@@ -3881,52 +3881,77 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
 //   g_p(x) = sum_q c_q (clamp(x + dY_q, 0, 255) - m_qp)^2 = sum_q c_q (clip(x, -dY_q, 255 - dY_q) - t_q)^2,
 // t_q = m_qp - dY_q. If every non-empty t_q lies in all non-empty clusters' clip intervals, clamping is
 // inactive on [min t, max t], g only grows away from that range, and so g >= min_x sum_q c_q (x - t_q)^2
-// (the weighted variance of t). In any case, as quantized centers x lie in [0, 255], clamp(x + dY_q) lies in
-// [0, 255 + dY_q] for dY_q < 0 and in [dY_q, 255] for dY_q > 0, which bounds each cluster's error from below.
+// (the weighted variance of t). As min t >= min m - max dY and max t <= max m - min dY, this holds when
+// min m >= span and max m <= 255 - span, span = max dY - min dY over the non-empty clusters.
+// In any case, as quantized centers x lie in [0, 255], clamp(x + dY_q) lies in [0, 255 + dY_q] for dY_q < 0
+// and in [dY_q, 255] for dY_q > 0, which bounds each cluster's error from below (saturation).
 // A margin covers the float rounding of both this bound and the reference error evaluation.
-inline void etc1_table_lower_bound(float out_lb[2], float colors[4][10], float base_err, uniform int table_level)
+struct etc1_lb_prep
 {
-    uniform float a = get_etc1_dY(table_level, 3);
-    uniform float b = get_etc1_dY(table_level, 2);
+    float A[3];     // sum_3 - sum_0 (channel sums of the outer clusters)
+    float B[3];     // sum_2 - sum_1
+    float Q[3];     // sum_q c_q m_q^2
+    float S[3];     // sum over all 8 pixels
+    float mmin[3];  // min / max of the non-empty cluster means
+    float mmax[3];
+};
 
-    float c0 = colors[0][3], c1 = colors[1][3], c2 = colors[2][3], c3 = colors[3][3];
-    float lo_max = c0 > 0 ? a : (c1 > 0 ? b : (c2 > 0 ? -b : -a));
-    float hi_min = 255 - (c3 > 0 ? a : (c2 > 0 ? b : (c1 > 0 ? -b : -a)));
-
-    float lb = base_err;
-    float lb4 = base_err;
+inline void etc1_lb_prepare(varying etc1_lb_prep* uniform prep, float colors[4][10])
+{
     for (uniform int p = 0; p < 3; p++)
     {
-        float tw = 0;
-        float tsq = 0;
-        float sat = 0;
-        float tmin = 1e9;
-        float tmax = -1e9;
+        prep->A[p] = colors[3][p] - colors[0][p];
+        prep->B[p] = colors[2][p] - colors[1][p];
+        prep->S[p] = colors[0][p] + colors[1][p] + colors[2][p] + colors[3][p];
+        float Q = 0;
+        float mmin = 1e9;
+        float mmax = -1e9;
         for (uniform int q = 0; q < 4; q++)
         {
-            float c = colors[q][3];
-            float t = colors[q][7 + p] - get_etc1_dY(table_level, q);
-            tw += c * t;
-            tsq += c * t * t;
-            tmin = min(tmin, c > 0 ? t : 1e9);
-            tmax = max(tmax, c > 0 ? t : -1e9);
-            // saturation: for centers in [0, 255], clamp(x + dY_q) cannot get closer to m_q than this
-            float d = q < 2 ? t - 255 : -t;
-            sat += c * sq(max(d, 0.0f));
+            float m = colors[q][7 + p];
+            Q += colors[q][p] * m;
+            if (colors[q][3] > 0)
+            {
+                mmin = min(mmin, m);
+                mmax = max(mmax, m);
+            }
         }
-        bool ok = tmin >= lo_max && tmax <= hi_min;
-        float tmean = tw * (1.0f / 8);
-        float var = tsq - tw * tmean;
-        // 4-bit mode: centers are multiples of 17
-        float d4 = abs(tmean - 17 * round(tmean * (1.0f / 17)));
-        float edge = max(min(tmean - tmin, tmax - tmean), 0.0f);
-        float var4 = var + 8 * sq(min(d4, edge));
+        prep->Q[p] = Q;
+        prep->mmin[p] = mmin;
+        prep->mmax[p] = mmax;
+    }
+}
+
+inline float etc1_table_lower_bound(varying etc1_lb_prep* uniform prep, float colors[4][10], float base_err,
+                                    uniform int table_level)
+{
+    uniform float a = etc1_codeword_a[table_level];
+    uniform float b = etc1_codeword_b[table_level];
+
+    float c0 = colors[0][3], c1 = colors[1][3], c2 = colors[2][3], c3 = colors[3][3];
+    float dy_min = c0 > 0 ? -a : (c1 > 0 ? -b : (c2 > 0 ? b : a));
+    float dy_max = c3 > 0 ? a : (c2 > 0 ? b : (c1 > 0 ? -b : -a));
+    float span = dy_max - dy_min;
+    float D = a * (c3 - c0) + b * (c2 - c1);                  // sum_q c_q dY_q
+    float E = (a * a) * (c0 + c3) + (b * b) * (c1 + c2);      // sum_q c_q dY_q^2
+
+    float lb = base_err;
+    for (uniform int p = 0; p < 3; p++)
+    {
+        // sum_q c_q t_q^2 - (sum_q c_q t_q)^2 / 8
+        float tw = prep->S[p] - D;
+        float var = prep->Q[p] - 2 * (a * prep->A[p] + b * prep->B[p]) + E - tw * tw * (1.0f / 8);
+        bool ok = prep->mmin[p] >= span && prep->mmax[p] <= 255 - span;
+
+        float sat = c0 * sq(max(colors[0][7 + p] + a - 255, 0.0f));
+        sat += c1 * sq(max(colors[1][7 + p] + b - 255, 0.0f));
+        sat += c2 * sq(max(b - colors[2][7 + p], 0.0f));
+        sat += c3 * sq(max(a - colors[3][7 + p], 0.0f));
+
         lb += ok ? max(var, sat) : sat;
-        lb4 += ok ? max(var4, sat) : sat;
     }
 
-    out_lb[0] = lb - (16 + lb * (1.0f / 16384));
-    out_lb[1] = lb4 - (16 + lb4 * (1.0f / 16384));
+    return lb - (16 + lb * (1.0f / 16384));
 }
 
 // Refines the candidate list for both diff modes at once: only the center quantization
@@ -4008,14 +4033,16 @@ inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcen
             }
         }
 
+        etc1_lb_prep prep_storage;
+        etc1_lb_prepare(&prep_storage, colors);
+
         for (uniform int table_level = 0; table_level < 8; table_level++)
         {
             // Skip the table when its error lower bound cannot beat the current best in any lane for
             // either mode: the reference `err < best_error` test would fail anyway.
             {
-                float lb[2];
-                etc1_table_lower_bound(lb, colors, base_err, table_level);
-                if (all(lb[0] > best_error[0] && lb[1] > best_error[1])) continue;
+                float lb = etc1_table_lower_bound(&prep_storage, colors, base_err, table_level);
+                if (all(lb > best_error[0] && lb > best_error[1])) continue;
             }
 
             float opt_center[3];
