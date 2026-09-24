@@ -3879,6 +3879,9 @@ inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcen
         for (uniform int p = 0; p < 3; p++) best_qcenter[m * 3 + p] = 0;
     }
 
+    float sum_sq_all = 0;
+    for (uniform int k = 0; k < 24; k++) sum_sq_all += sq(half_pixels[16 * (k >> 3) + (k & 7)]);
+
     for (uniform int i = 0; i < fastSkipTreshold; i++)
     {
         int packed = err_list[i] & 0xFFF;
@@ -3923,19 +3926,19 @@ inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcen
                 for (uniform int q = 0; q < 4; q++)
                 {
                     colors[q][p] += value * qvec[q];
-                    colors[q][4 + p] += sq(value) * qvec[q];
                 }
             }
         }
-        
-        float base_err = 0;
+
+        // within-cluster error: sum of squares of all pixels minus sum_q c_q m_q^2
+        float base_err = sum_sq_all;
         for (uniform int q = 0; q < 4; q++)
         {
             if (colors[q][3] > 0)
             for (uniform int p = 0; p < 3; p++)
             {
                 colors[q][7 + p] = colors[q][p] / colors[q][3];
-                base_err += colors[q][4 + p] - sq(colors[q][7 + p])*colors[q][3];
+                base_err -= colors[q][p] * colors[q][7 + p];
             }
         }
 
