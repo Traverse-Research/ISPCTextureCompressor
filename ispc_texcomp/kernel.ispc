@@ -3711,15 +3711,26 @@ void etc1_half_candidates(int err_list[165], int y_sorted_inv[8], float half_pix
     partial_sort_list(err_list, 165, state->fastSkipTreshold);
 }
 
-float compress_etc1_half_7(uint32 out_qbits[1], int out_table[1], int out_qcenter[3],
-                           float half_pixels[], int err_list[165], int y_sorted_inv[8], etc_enc_state state[])
+// Refines the candidate list for both diff modes at once: only the center quantization
+// (and the prev_qcenter clamping in diff mode) depends on the mode. Index m: 0 = diff, 1 = individual.
+void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcenter[6], float out_err[2],
+                      float half_pixels[], int err_list[165], int y_sorted_inv[8],
+                      int prev_qcenter[3], uniform int fastSkipTreshold)
 {
-    float best_error = sq(255) * 3 * 8.0f;
-    int best_table = -1;
-    int best_qcenter[3];
-    uint32 best_qbits;
+    float best_error[2];
+    int best_table[2];
+    int best_qcenter[6];
+    uint32 best_qbits[2];
 
-    for (uniform int i = 0; i < state->fastSkipTreshold; i++)
+    for (uniform int m = 0; m < 2; m++)
+    {
+        best_error[m] = sq(255) * 3 * 8.0f;
+        best_table[m] = -1;
+        best_qbits[m] = 0;
+        for (uniform int p = 0; p < 3; p++) best_qcenter[m * 3 + p] = 0;
+    }
+
+    for (uniform int i = 0; i < fastSkipTreshold; i++)
     {
         int packed = err_list[i] & 0xFFF;
         int level1 = (packed >> 8) & 0xF;
@@ -3781,49 +3792,46 @@ float compress_etc1_half_7(uint32 out_qbits[1], int out_table[1], int out_qcente
 
         for (uniform int table_level = 0; table_level < 8; table_level++)
         {
-            float center[3];
-            int qcenter[3];
-            
+            float opt_center[3];
             for (uniform int p = 0; p < 3; p++)
             {
-                center[p] = optimize_center(colors, p, table_level);
+                opt_center[p] = optimize_center(colors, p, table_level);
             }
-            
-            center_quant_dequant(qcenter, center, state->diff, state->prev_qcenter);
-            
-            float err = base_err;
-            for (uniform int q = 0; q < 4; q++)
+
+            for (uniform int m = 0; m < 2; m++)
             {
-                int dY = get_etc1_dY(table_level, q);
-                for (uniform int p = 0; p < 3; p++)
-                    err += sq(clamp(center[p] + dY, 0, 255) - colors[q][7 + p])*colors[q][3];
-            }
-            
-            if (err < best_error)
-            {
-                best_error = err;
-                best_table = table_level;
-                best_qbits = qbits;
-                for (uniform int p = 0; p < 3; p++) best_qcenter[p] = qcenter[p];
+                float center[3];
+                int qcenter[3];
+                for (uniform int p = 0; p < 3; p++) center[p] = opt_center[p];
+
+                center_quant_dequant(qcenter, center, m == 0, prev_qcenter);
+
+                float err = base_err;
+                for (uniform int q = 0; q < 4; q++)
+                {
+                    int dY = get_etc1_dY(table_level, q);
+                    for (uniform int p = 0; p < 3; p++)
+                        err += sq(clamp(center[p] + dY, 0, 255) - colors[q][7 + p])*colors[q][3];
+                }
+
+                if (err < best_error[m])
+                {
+                    best_error[m] = err;
+                    best_table[m] = table_level;
+                    best_qbits[m] = qbits;
+                    for (uniform int p = 0; p < 3; p++) best_qcenter[m * 3 + p] = qcenter[p];
+                }
             }
         }
     }
 
-    out_table[0] = best_table;
-    out_qbits[0] = best_qbits;
-    for (uniform int p = 0; p < 3; p++) out_qcenter[p] = best_qcenter[p];
-    return best_error;
-}
-
-float compress_etc1_half(uint32 qbits[1], int table[1], int qcenter[3], float half_pixels[],
-                         int err_list[165], int y_sorted_inv[8], etc_enc_state state[])
-{
-    float err = compress_etc1_half_7(qbits, table, qcenter, half_pixels, err_list, y_sorted_inv, state);
-
-    for (uniform int p = 0; p < 3; p++)
-        state->prev_qcenter[p] = qcenter[p];
-
-    return err;
+    for (uniform int m = 0; m < 2; m++)
+    {
+        out_table[m] = best_table[m];
+        out_qbits[m] = best_qbits[m];
+        out_err[m] = best_error[m];
+        for (uniform int p = 0; p < 3; p++) out_qcenter[m * 3 + p] = best_qcenter[m * 3 + p];
+    }
 }
 
 //////////////////////////
@@ -3910,18 +3918,36 @@ inline void CompressBlockETC1_core(etc_enc_state state[])
     etc1_half_candidates(err_list[0], y_sorted_inv[0], &pixels[0], state);
     etc1_half_candidates(err_list[1], y_sorted_inv[1], &pixels[8], state);
 
+    uint32 hqbits[2][2];
+    int htables[2][2];
+    int hqcenters[2][6];
+    float herr[2][2];
+
+    int no_prev[3];
+    for (uniform int p = 0; p < 3; p++) no_prev[p] = -1;
+
+    // the second half's diff-mode center is clamped relative to the first half's diff-mode center
+    etc1_half_refine(hqbits[0], htables[0], hqcenters[0], herr[0], &pixels[0], err_list[0], y_sorted_inv[0],
+                     no_prev, state->fastSkipTreshold);
+    etc1_half_refine(hqbits[1], htables[1], hqcenters[1], herr[1], &pixels[8], err_list[1], y_sorted_inv[1],
+                     hqcenters[0], state->fastSkipTreshold);
+
     for (uniform int diff = 1; diff >= 0; diff--)
     {
-        state->diff = diff == 1;
-        state->prev_qcenter[0] = -1;
+        uniform int m = 1 - diff;
 
         uint32 qbits[2];
         int tables[2];
         int qcenters[2][3];
 
         float err = 0;
-        err += compress_etc1_half(&qbits[0], &tables[0], qcenters[0], &pixels[0], err_list[0], y_sorted_inv[0], state);
-        err += compress_etc1_half(&qbits[1], &tables[1], qcenters[1], &pixels[8], err_list[1], y_sorted_inv[1], state);
+        for (uniform int h = 0; h < 2; h++)
+        {
+            err += herr[h][m];
+            qbits[h] = hqbits[h][m];
+            tables[h] = htables[h][m];
+            for (uniform int p = 0; p < 3; p++) qcenters[h][p] = hqcenters[h][m * 3 + p];
+        }
 
         if (err < state->best_err)
         {
