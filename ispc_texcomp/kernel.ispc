@@ -1672,9 +1672,15 @@ inline uniform uint32 get_pattern_uniform(uniform int part_id)
 }
 
 // Ranks `count` partitions (ids first_id..first_id+count) by the bbox estimate into list[],
-// packed as (estimate << 6) | index like the PCA-bound lists.
-inline void bc7_rank_partitions(int list[], float block[64], uniform int first_id, uniform int count, uniform int pairs, uniform int levels, uniform int channels)
+// packed as (estimate << 6) | index like the PCA-bound lists. When every partition will be
+// fully evaluated anyway (`evaluated` >= count) the order doesn't matter and ranking is skipped.
+inline void bc7_rank_partitions(int list[], float block[64], uniform int first_id, uniform int count, uniform int pairs, uniform int levels, uniform int channels, uniform int evaluated)
 {
+	if (evaluated >= count)
+	{
+		for (uniform int part=0; part<count; part++) list[part] = part;
+		return;
+	}
 	for (uniform int part=0; part<count; part++)
 	{
 		float e = bc7_partition_estimate(block, get_pattern_uniform(first_id + part), pairs, levels, channels);
@@ -1689,7 +1695,7 @@ inline void bc7_enc_mode02(bc7_enc_state state[])
 	// count: a quarter of it for mode 0's 16 partitions, all of it for mode 2's 64.
 	uniform int mode0_count = clamp(state->fastSkipTreshold_mode3 / 4, 1, 16);
 	int mode0_list[16];
-	bc7_rank_partitions(mode0_list, state->block, 64, 16, 3, 8, 3);
+	bc7_rank_partitions(mode0_list, state->block, 64, 16, 3, 8, 3, mode0_count);
 	partial_sort_list(mode0_list, 16, mode0_count);
 	bc7_enc_mode01237(state, 0, mode0_list, mode0_count, NULL);
 
@@ -1697,7 +1703,7 @@ inline void bc7_enc_mode02(bc7_enc_state state[])
 	{
 		uniform int mode2_count = clamp(state->fastSkipTreshold_mode3, 1, 64);
 		int mode2_list[64];
-		bc7_rank_partitions(mode2_list, state->block, 64, 64, 3, 4, 3);
+		bc7_rank_partitions(mode2_list, state->block, 64, 64, 3, 4, 3, mode2_count);
 		partial_sort_list(mode2_list, 64, mode2_count);
 		bc7_enc_mode01237(state, 2, mode2_list, mode2_count, NULL);
 	}
@@ -1715,7 +1721,7 @@ inline void bc7_enc_mode13(bc7_enc_state state[])
 	// PCA bound it replaces but predicts the final error better, so fewer candidates need a
 	// full evaluation for the same quality.
 	uniform int scan_count = 64;
-	bc7_rank_partitions(part_list, state->block, 0, scan_count, 2, 8, 3);
+	bc7_rank_partitions(part_list, state->block, 0, scan_count, 2, 8, 3, max(state->fastSkipTreshold_mode1, state->fastSkipTreshold_mode3));
 
 	partial_sort_list(part_list, scan_count, min(scan_count, max(state->fastSkipTreshold_mode1, state->fastSkipTreshold_mode3)));
 	// Modes 1 and 3 share the same ranked partition list and the same PCA segments per
@@ -1737,7 +1743,7 @@ inline void bc7_enc_mode7(bc7_enc_state state[])
     if (state->fastSkipTreshold_mode7 == 0) return;
 
 	int part_list[64];
-	bc7_rank_partitions(part_list, state->block, 0, 64, 2, 4, state->channels);
+	bc7_rank_partitions(part_list, state->block, 0, 64, 2, 4, state->channels, state->fastSkipTreshold_mode7);
 
 	partial_sort_list(part_list, 64, state->fastSkipTreshold_mode7);
 	bc7_enc_mode01237(state, 7, part_list, state->fastSkipTreshold_mode7, NULL);
