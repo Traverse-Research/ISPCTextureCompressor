@@ -3403,12 +3403,11 @@ struct etc_enc_settings
     int fastSkipTreshold;
 };
 
-// Per-candidate constants of the pass-1 candidate error (see etc1_half_candidates); candidates are
+// Per-candidate constants of the candidate error (see etc1_half_candidates); candidates are
 // enumerated as level1 <= level2 <= level3 in 0..8 with counts c = (l1, l2 - l1, l3 - l2, 8 - l3):
 //   D = (c3 - c0) a + (c2 - c1) b,  K = 72 ((c0 + c3) a^2 + (c1 + c2) b^2) - 9 D^2  for table { -a, -b, b, a }
 struct etc1_pass1_consts
 {
-    int D[165][8];
     int K[165][8];
 };
 
@@ -3737,12 +3736,14 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
         int u = (y_total - y_prefix[level3]) - y_prefix[level1];
         int v = (y_prefix[level3] - y_prefix[level2]) - (y_prefix[level2] - y_prefix[level1]);
 
+        // D y_total6 - 48 (a u + b v) = a U + b V
+        int U = (8 - level3 - level1) * y_total6 - 48 * u;
+        int V = (level3 + level1 - 2 * level2) * y_total6 - 48 * v;
+
         int best = 0x7FFFFFFF;
         for (uniform int table_level = 0; table_level < 8; table_level++)
         {
-            uniform int D = pass1->D[idx][table_level];
-            uniform int K = pass1->K[idx][table_level];
-            int r = K + D * y_total6 - (48 * etc1_codeword_a[table_level]) * u - (48 * etc1_codeword_b[table_level]) * v;
+            int r = pass1->K[idx][table_level] + etc1_codeword_a[table_level] * U + etc1_codeword_b[table_level] * V;
             best = min(best, r);
         }
         best += base72;  // = 72 * err, >= 0
@@ -4180,7 +4181,6 @@ export void CompressBlocksETC1_ispc(uniform rgba_surface src[], uniform uint8 ds
                 uniform int a = etc1_codeword_a[t];
                 uniform int b = etc1_codeword_b[t];
                 uniform int D = (c3 - c0) * a + (c2 - c1) * b;
-                pass1.D[idx][t] = D;
                 pass1.K[idx][t] = 72 * ((c0 + c3) * a * a + (c1 + c2) * b * b) - 9 * D * D;
             }
             idx++;
