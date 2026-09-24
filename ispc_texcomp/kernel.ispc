@@ -3562,7 +3562,9 @@ float compress_etc1_half_7(uint32 out_qbits[1], int out_table[1], int out_qcente
                 
         float colors[4][10];
 
-        for (uniform int p = 0; p < 7; p++)
+        // Initialize all 10 slots: colors[q][7..10] is read (weighted by a zero count) for
+        // empty clusters, and uninitialized NaNs there poison the error comparison.
+        for (uniform int p = 0; p < 10; p++)
         for (uniform int q = 0; q < 4; q++) colors[q][p] = 0;
 
         uint32 qbits = 0;
