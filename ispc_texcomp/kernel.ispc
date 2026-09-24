@@ -1224,11 +1224,13 @@ void ep_quant_dequant(int qep[], float ep[], uniform int mode, uniform int chann
 ///////////////////////////
 //   pixel quantization
 
-float block_quant(uint32 qblock[2], float block[64], uniform int bits, float ep[], uint32 pattern, uniform int channels)
+float block_quant(uint32 qblock[2], float block[64], uniform int bits, float ep[], uint32 pattern, uniform int channels, uniform int pairs)
 {
 	float total_err = 0;
-	uniform const int* uniform unquant_table = get_unquant_table(bits);
-    int levels = 1 << bits;
+    uniform int levels = 1 << bits;
+    // Unquantization weights round(q*64/(levels-1)); identical to the BC7 2/3/4-bit tables,
+    // but computed arithmetically instead of with a per-lane table gather.
+    uniform float wscale = 64.0f / (levels - 1);
 
 	// 64-bit qblock: 5% overhead in this function
 	for (uniform int k=0; k<2; k++) qblock[k] = 0;
@@ -1239,14 +1241,30 @@ float block_quant(uint32 qblock[2], float block[64], uniform int bits, float ep[
 		int j = pattern_shifted&3;
 		pattern_shifted >>= 2;
 
+        // Select this pixel's endpoint pair with vector selects rather than gathers.
+        float ep_a[4], ep_b[4];
+        for (uniform int p=0; p<channels; p++)
+        {
+            ep_a[p] = ep[0+p];
+            ep_b[p] = ep[4+p];
+            if (pairs >= 2)
+            {
+                ep_a[p] = (j == 1) ? ep[8+p] : ep_a[p];
+                ep_b[p] = (j == 1) ? ep[12+p] : ep_b[p];
+            }
+            if (pairs >= 3)
+            {
+                ep_a[p] = (j == 2) ? ep[16+p] : ep_a[p];
+                ep_b[p] = (j == 2) ? ep[20+p] : ep_b[p];
+            }
+        }
+
 		float proj = 0;
 		float div = 0;
 		for (uniform int p=0; p<channels; p++)
         {
-			float ep_a = gather_float(ep, 8*j+0+p);
-			float ep_b = gather_float(ep, 8*j+4+p);
-            proj += (block[k+p*16]-ep_a)*(ep_b-ep_a);
-            div += sq(ep_b-ep_a);
+            proj += (block[k+p*16]-ep_a[p])*(ep_b[p]-ep_a[p]);
+            div += sq(ep_b[p]-ep_a[p]);
         }
         
         proj /= div;
@@ -1256,15 +1274,13 @@ float block_quant(uint32 qblock[2], float block[64], uniform int bits, float ep[
 		
 		float err0 = 0;
 		float err1 = 0;
-		int w0 = gather_int(unquant_table, q1-1);
-		int w1 = gather_int(unquant_table, q1);
+		int w0 = (int)((q1-1)*wscale+0.5f);
+		int w1 = (int)(q1*wscale+0.5f);
 
 		for (uniform int p=0; p<channels; p++)
 		{
-			float ep_a = gather_float(ep, 8*j+0+p);
-			float ep_b = gather_float(ep, 8*j+4+p);
-			float dec_v0 = (int)(((64-w0)*ep_a + w0*ep_b + 32)/64);
-			float dec_v1 = (int)(((64-w1)*ep_a + w1*ep_b + 32)/64);
+			float dec_v0 = (int)(((64-w0)*ep_a[p] + w0*ep_b[p] + 32)/64);
+			float dec_v1 = (int)(((64-w1)*ep_a[p] + w1*ep_b[p] + 32)/64);
 			err0 += sq(dec_v0 - block[k+p*16]);
 			err1 += sq(dec_v1 - block[k+p*16]);
 		}
@@ -1386,7 +1402,7 @@ float bc7_enc_mode01237_part_fast(int qep[24], uint32 qblock[2], float block[64]
 
 	ep_quant_dequant(qep, ep, mode, channels);
 
-	float total_err = block_quant(qblock, block, bits, ep, pattern, channels);
+	float total_err = block_quant(qblock, block, bits, ep, pattern, channels, pairs);
 	return total_err;
 }
 
@@ -1437,7 +1453,7 @@ void bc7_enc_mode01237(bc7_enc_state state[], uniform int mode, int part_list[],
 		ep_quant_dequant(qep, ep, mode, channels);
 		
 		uint32 pattern = get_pattern(best_part_id);
-		float err = block_quant(qblock, state->block, bits, ep, pattern, channels);
+		float err = block_quant(qblock, state->block, bits, ep, pattern, channels, pairs);
 
 		if (err<best_err)
 		{
@@ -1685,7 +1701,7 @@ void bc7_enc_mode45_candidate(bc7_enc_state state[], mode45_parameters best_cand
 	ep_quant_dequant(qep, ep, mode, 3);
 
 	uint32 qblock[2];
-	float err = block_quant(qblock, block, bits, ep, 0, 3);
+	float err = block_quant(qblock, block, bits, ep, 0, 3, 1);
 	
 	// refine
     uniform int refineIterations = state->refineIterations[mode];
@@ -1693,7 +1709,7 @@ void bc7_enc_mode45_candidate(bc7_enc_state state[], mode45_parameters best_cand
     {
         opt_endpoints(ep, block, bits, qblock, -1, 3);
         ep_quant_dequant(qep, ep, mode, 3);
-		err = block_quant(qblock, block, bits, ep, 0, 3);
+		err = block_quant(qblock, block, bits, ep, 0, 3, 1);
     }
 
 	// encoding selected channel 
@@ -1764,7 +1780,7 @@ void bc7_enc_mode6(bc7_enc_state state[])
 	ep_quant_dequant(qep, ep, mode, state->channels);
 
 	uint32 qblock[2];
-	float err = block_quant(qblock, state->block, bits, ep, 0, state->channels);
+	float err = block_quant(qblock, state->block, bits, ep, 0, state->channels, 1);
 
 	// refine
 	uniform int refineIterations = state->refineIterations[mode];
@@ -1772,7 +1788,7 @@ void bc7_enc_mode6(bc7_enc_state state[])
     {
         opt_endpoints(ep, state->block, bits, qblock, -1, state->channels);
         ep_quant_dequant(qep, ep, mode, state->channels);
-		err = block_quant(qblock, state->block, bits, ep, 0, state->channels);
+		err = block_quant(qblock, state->block, bits, ep, 0, state->channels, 1);
     }
         
     if (err<state->best_err)
@@ -2281,7 +2297,7 @@ float bc6h_enc_2p_part_fast(bc6h_enc_state state[], int qep[16], uint32 qblock[2
 
     ep_quant_dequant_bc6h(state, qep, ep, 2);
 
-    float total_err = block_quant(qblock, state->block, bits, ep, pattern, channels);
+    float total_err = block_quant(qblock, state->block, bits, ep, pattern, channels, pairs);
     return total_err;
 
 }
@@ -2331,7 +2347,7 @@ void bc6h_enc_2p_list(bc6h_enc_state state[], int part_list[], uniform int part_
         ep_quant_dequant_bc6h(state, qep, ep, 2);
 
         uint32 pattern = get_pattern(best_part_id);
-        float err = block_quant(qblock, state->block, bits, ep, pattern, channels);
+        float err = block_quant(qblock, state->block, bits, ep, pattern, channels, pairs);
 
         if (err<best_err)
         {
@@ -2375,7 +2391,7 @@ void bc6h_enc_1p(bc6h_enc_state state[])
     ep_quant_dequant_bc6h(state, qep, ep, 1);
 
     uint32 qblock[2];
-    float err = block_quant(qblock, state->block, 4, ep, 0, 3);
+    float err = block_quant(qblock, state->block, 4, ep, 0, 3, 1);
 
     // refine
     uniform int refineIterations = state->refineIterations_1p;
@@ -2383,7 +2399,7 @@ void bc6h_enc_1p(bc6h_enc_state state[])
     {
         opt_endpoints(ep, state->block, 4, qblock, -1, 3);
         ep_quant_dequant_bc6h(state, qep, ep, 1);
-        err = block_quant(qblock, state->block, 4, ep, 0, 3);
+        err = block_quant(qblock, state->block, 4, ep, 0, 3, 1);
     }
 
     if (err < state->best_err)
