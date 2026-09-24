@@ -3669,11 +3669,18 @@ inline void etc1_partial_sort_list(int list[], uniform int length, uniform int p
 // so it is computed once per (flip, half) and shared by both diff modes.
 // Outputs the fastSkipTreshold best candidates (sorted ascending) in err_list and the rank of each
 // pixel in luma-sorted order in y_rank.
+//
+// A candidate splits the 8 luma-sorted values y = Y / 3 (Y = r + g + b) into 4 clusters (counts c_q,
+// sums Ysum_q) mapped to the table modifiers dY = (-a, -b, b, a). Its error is the smallest over the 8
+// tables of the least-squares error with an unconstrained center, which is exactly
+//   72 err_t = 8 sum(Y^2) - Ytot^2 + 6 Ytot D - 9 D^2 + 72 E - 48 (a u + b v)
+// with D = sum(c_q dY_q), E = sum(c_q dY_q^2), u = Ysum_3 - Ysum_0, v = Ysum_2 - Ysum_1, evaluated here in
+// exact integer arithmetic. (The reference implementation evaluated the same expression in float,
+// which only differs by rounding, i.e. candidates can reorder on near-ties.)
 inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pixels[], uniform int fastSkipTreshold,
                                  uniform etc1_pass1_consts* uniform pass1)
 {
-    float y_sorted[8];
-    int y_sorted_int[8];
+    int y_prefix[9];
     {
         int keys[8];
         for (uniform int k = 0; k < 8; k++)
@@ -3702,98 +3709,23 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
         etc1_cmp_swap(keys, 1, 4); etc1_cmp_swap(keys, 3, 6);
         etc1_cmp_swap(keys, 1, 2); etc1_cmp_swap(keys, 3, 4); etc1_cmp_swap(keys, 5, 6);
 
+        y_prefix[0] = 0;
         for (uniform int k = 0; k < 8; k++)
-        {
-            y_sorted_int[k] = keys[k] >> 4;
-            y_sorted[k] = (keys[k] >> 4) / 3.0f;
-        }
+            y_prefix[k + 1] = y_prefix[k] + (keys[k] >> 4);
     }
 
-    // Per-range cluster statistics over sorted values [a, b), accumulated in the same order as
-    // a per-candidate loop would, so results are bit-identical.
-    float range_sum[9][9];
-    float range_base[9][9];
-    for (uniform int a = 0; a <= 8; a++)
-    {
-        float sum = 0;
-        float sum_sq = 0;
-        range_sum[a][a] = 0;
-        range_base[a][a] = 0;
-        for (uniform int b = a + 1; b <= 8; b++)
-        {
-            sum += y_sorted[b - 1];
-            sum_sq += sq(y_sorted[b - 1]);
-            uniform float inv_count = 1 / (uniform float)(b - a);
-            range_sum[a][b] = sum;
-            range_base[a][b] = sum_sq - sq(sum) * inv_count;
-        }
-    }
-
-    // Pass 1: exact integer evaluation of the real-valued (unrounded) candidate error.
-    // With Y = 3*y (integer luma sums), cluster sums Ysum_q, counts c_q and dY = (-a, -b, b, a):
-    //   72 * err_t = 8*sum(Y^2) + 72*sum(c_q dY_q^2) - (Ytot - 3*sum(c_q dY_q))^2 - 48*sum(Ysum_q dY_q)
-    // The float evaluation below differs from err_t/72 only by rounding, so it gives tight
-    // bounds on the float key and lets pass 2 skip candidates that cannot reach the top-k.
-    uniform bool use_topk = fastSkipTreshold >= 1 && fastSkipTreshold <= ETC1_MAX_TOPK;
-    int topk[ETC1_MAX_TOPK];
-    for (uniform int i = 0; i < ETC1_MAX_TOPK; i++) topk[i] = 0x7FFFFFFF;
-
-    int y_prefix[9];
     int sum_y2 = 0;
-    y_prefix[0] = 0;
     for (uniform int k = 0; k < 8; k++)
     {
-        int Y = y_sorted_int[k];
-        y_prefix[k + 1] = y_prefix[k] + Y;
+        int Y = y_prefix[k + 1] - y_prefix[k];
         sum_y2 += Y * Y;
     }
     int y_total = y_prefix[8];
     int base72 = 8 * sum_y2 - y_total * y_total;
     int y_total6 = 6 * y_total;
 
-    int lb_key[165];
-    {
-        uniform int idx = -1;
-        for (uniform int level1 = 0; level1 <= 8; level1++)
-        for (uniform int level2 = level1; level2 <= 8; level2++)
-        for (uniform int level3 = level2; level3 <= 8; level3++)
-        {
-            idx++;
-            int u = (y_total - y_prefix[level3]) - y_prefix[level1];
-            int v = (y_prefix[level3] - y_prefix[level2]) - (y_prefix[level2] - y_prefix[level1]);
-
-            // 72 err_t = base72 - y_total^2 + 6 y_total D - 9 D^2 + 72 E - 48 (a u + b v)
-            //   with D = sum(c_q dY_q), E = sum(c_q dY_q^2)
-            int best = 0x7FFFFFFF;
-            for (uniform int table_level = 0; table_level < 8; table_level++)
-            {
-                uniform int D = pass1->D[idx][table_level];
-                uniform int K = pass1->K[idx][table_level];
-                int r = K + D * y_total6 - (48 * etc1_codeword_a[table_level]) * u - (48 * etc1_codeword_b[table_level]) * v;
-                best = min(best, r);
-            }
-            best += base72;
-            // |float t_err - best/72| is below 0.15 on test data; the rounding error analysis gives < 0.5.
-            // A margin of 1.0 keeps the bounds conservative.
-            float approx = (float)best * (1.0f / 72);
-            int lb = (((int)(approx - 1.0f)) << 12) + ((level1 * 16 + level2) * 16 + level3);
-            int ub = (((int)(approx + 1.0f)) << 12) + ((level1 * 16 + level2) * 16 + level3);
-            lb_key[idx] = lb;
-            if (use_topk && any(ub < topk[fastSkipTreshold - 1]))
-            {
-                for (uniform int i = 0; i < fastSkipTreshold; i++)
-                {
-                    int t = topk[i];
-                    topk[i] = min(t, ub);
-                    ub = max(t, ub);
-                }
-            }
-        }
-    }
-
-    // Pass 2: exact float evaluation (bit-identical to the reference) of every candidate whose
-    // lower bound can still beat the k-th smallest upper bound in some lane.
-    int key_bound = topk[clamp(fastSkipTreshold, 1, ETC1_MAX_TOPK) - 1];
+    uniform bool use_topk = fastSkipTreshold >= 1 && fastSkipTreshold <= ETC1_MAX_TOPK;
+    int topk[ETC1_MAX_TOPK];
     for (uniform int i = 0; i < ETC1_MAX_TOPK; i++) topk[i] = 0x7FFFFFFF;
 
     uniform int idx = -1;
@@ -3802,71 +3734,21 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
     for (uniform int level3 = level2; level3 <= 8; level3++)
     {
         idx++;
-        if (use_topk && all(lb_key[idx] > key_bound)) continue;
+        int u = (y_total - y_prefix[level3]) - y_prefix[level1];
+        int v = (y_prefix[level3] - y_prefix[level2]) - (y_prefix[level2] - y_prefix[level1]);
 
-        uniform int lo[4] = { 0, level1, level2, level3 };
-        uniform int hi[4] = { level1, level2, level3, 8 };
-
-        // Empty clusters contribute exactly +0 to center and err, so only visit the non-empty ones.
-        uniform int nq = 0;
-        uniform int qidx[4];
-        float sum[4];
-        uniform float count[4];
-        uniform float inv_count[4];
-        float base_err = 0;
-        for (uniform int q = 0; q < 4; q++)
+        int best = 0x7FFFFFFF;
+        for (uniform int table_level = 0; table_level < 8; table_level++)
         {
-            base_err += range_base[lo[q]][hi[q]];
-            if (hi[q] > lo[q])
-            {
-                qidx[nq] = q;
-                sum[nq] = range_sum[lo[q]][hi[q]];
-                count[nq] = hi[q] - lo[q];
-                inv_count[nq] = 1 / count[nq];
-                nq++;
-            }
+            uniform int D = pass1->D[idx][table_level];
+            uniform int K = pass1->K[idx][table_level];
+            int r = K + D * y_total6 - (48 * etc1_codeword_a[table_level]) * u - (48 * etc1_codeword_b[table_level]) * v;
+            best = min(best, r);
         }
+        best += base72;  // = 72 * err, >= 0
 
         uniform int packed = (level1 * 16 + level2) * 16 + level3;
-
-        // Only tables whose exact error is within 2 * margin of the exact minimum can hold the float
-        // minimum (same bound as in pass 1), so the others are skipped when no lane needs them.
-        bool table_needed[8];
-        {
-            int u = (y_total - y_prefix[level3]) - y_prefix[level1];
-            int v = (y_prefix[level3] - y_prefix[level2]) - (y_prefix[level2] - y_prefix[level1]);
-            int r[8];
-            int rmin = 0x7FFFFFFF;
-            for (uniform int table_level = 0; table_level < 8; table_level++)
-            {
-                r[table_level] = pass1->K[idx][table_level] + pass1->D[idx][table_level] * y_total6
-                    - (48 * etc1_codeword_a[table_level]) * u - (48 * etc1_codeword_b[table_level]) * v;
-                rmin = min(rmin, r[table_level]);
-            }
-            for (uniform int table_level = 0; table_level < 8; table_level++)
-                table_needed[table_level] = r[table_level] <= rmin + 2 * 72;
-        }
-
-        float t_err = sq(256) * 8;
-#define ETC1_TABLE_SEARCH(NQ) \
-        for (uniform int table_level = 0; table_level < 8; table_level++) \
-        { \
-            if (!any(table_needed[table_level])) continue; \
-            float center = 0; \
-            for (uniform int j = 0; j < NQ; j++) center += sum[j] - get_etc1_dY(table_level, qidx[j]) * count[j]; \
-            center /= 8; \
-            float err = base_err; \
-            for (uniform int j = 0; j < NQ; j++) \
-                err += sq(center + get_etc1_dY(table_level, qidx[j]) - sum[j] * inv_count[j])*count[j]; \
-            t_err = min(t_err, err); \
-        }
-        if (nq == 4) { ETC1_TABLE_SEARCH(4) }
-        else if (nq == 3) { ETC1_TABLE_SEARCH(3) }
-        else if (nq == 2) { ETC1_TABLE_SEARCH(2) }
-        else { ETC1_TABLE_SEARCH(1) }
-#undef ETC1_TABLE_SEARCH
-
-        int key = (((int)t_err) << 12) + packed;
+        int key = ((best / 72) << 12) + packed;
 
         if (use_topk)
         {
