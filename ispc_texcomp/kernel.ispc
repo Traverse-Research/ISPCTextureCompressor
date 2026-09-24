@@ -896,6 +896,46 @@ inline void compute_stats_masked(float stats[15], float block[64], int mask, uni
 	}
 }
 
+// Uniform-mask variant: when every lane evaluates the same partition, pixels outside the
+// subset can be skipped with a uniform branch instead of being multiplied by zero.
+inline void compute_stats_masked(float stats[15], float block[64], uniform int mask, uniform int channels)
+{
+	for (uniform int i=0; i<15; i++) stats[i] = 0;
+
+	for (uniform int k=0; k<16; k++)
+	{
+		if (((mask>>k)&1) == 0) continue;
+
+		float rgba[4];
+		for (uniform int p=0; p<channels; p++) rgba[p] = block[k+p*16];
+
+		stats[14] += 1;
+
+		stats[10] += rgba[0];
+		stats[11] += rgba[1];
+		stats[12] += rgba[2];
+
+		stats[0] += rgba[0]*rgba[0];
+		stats[1] += rgba[0]*rgba[1];
+		stats[2] += rgba[0]*rgba[2];
+
+		stats[4] += rgba[1]*rgba[1];
+		stats[5] += rgba[1]*rgba[2];
+
+		stats[7] += rgba[2]*rgba[2];
+
+        if (channels==4)
+        {
+		    stats[13] += rgba[3];
+
+    		stats[3] += rgba[0]*rgba[3];
+	    	stats[6] += rgba[1]*rgba[3];
+		    stats[8] += rgba[2]*rgba[3];
+		    stats[9] += rgba[3]*rgba[3];
+        }
+	}
+}
+
 inline void covar_from_stats(float covar[10], float stats[15], uniform int channels)
 {
 	covar[0] = stats[0] - stats[10+0]*stats[10+0]/stats[14];
@@ -1043,7 +1083,7 @@ inline float block_pca_bound(float block[64], int mask, uniform int channels)
 	return get_pca_bound(covar, channels);
 }
 
-inline float block_pca_bound_split(float block[64], int mask, float full_stats[15], uniform int channels)
+inline float block_pca_bound_split(float block[64], uniform int mask, float full_stats[15], uniform int channels)
 {
     float stats[15];
 	compute_stats_masked(stats, block, mask, channels);
@@ -1232,6 +1272,26 @@ inline float block_quant(uint32 qblock[2], float block[64], uniform int bits, fl
     // but computed arithmetically instead of with a per-lane table gather.
     uniform float wscale = 64.0f / (levels - 1);
 
+    // Per-subset setup hoisted out of the pixel loop. Dequantized endpoints are integers,
+    // so the palette interpolation ((64-w)*a + w*b + 32)/64 is done exactly in int32.
+    float ep_af[3][4], ep_df[3][4], proj_scale[3];
+    int ep_a64[3][4], ep_d[3][4];
+    for (uniform int j=0; j<pairs; j++)
+    {
+        float div = 0;
+        for (uniform int p=0; p<channels; p++)
+        {
+            float a = ep[8*j+p];
+            float b = ep[8*j+4+p];
+            ep_af[j][p] = a;
+            ep_df[j][p] = b-a;
+            div += sq(b-a);
+            ep_a64[j][p] = (int)a*64+32;
+            ep_d[j][p] = (int)b-(int)a;
+        }
+        proj_scale[j] = levels/div;
+    }
+
 	// 64-bit qblock: 5% overhead in this function
 	for (uniform int k=0; k<2; k++) qblock[k] = 0;
 
@@ -1241,50 +1301,57 @@ inline float block_quant(uint32 qblock[2], float block[64], uniform int bits, fl
 		int j = pattern_shifted&3;
 		pattern_shifted >>= 2;
 
-        // Select this pixel's endpoint pair with vector selects rather than gathers.
-        float ep_a[4], ep_b[4];
+        // Select this pixel's subset with vector selects rather than gathers.
+        float af[4], df[4];
+        int a64[4], d[4];
+        float scale = proj_scale[0];
         for (uniform int p=0; p<channels; p++)
         {
-            ep_a[p] = ep[0+p];
-            ep_b[p] = ep[4+p];
-            if (pairs >= 2)
+            af[p] = ep_af[0][p]; df[p] = ep_df[0][p]; a64[p] = ep_a64[0][p]; d[p] = ep_d[0][p];
+        }
+        if (pairs >= 2)
+        {
+            scale = (j == 1) ? proj_scale[1] : scale;
+            for (uniform int p=0; p<channels; p++)
             {
-                ep_a[p] = (j == 1) ? ep[8+p] : ep_a[p];
-                ep_b[p] = (j == 1) ? ep[12+p] : ep_b[p];
+                af[p] = (j == 1) ? ep_af[1][p] : af[p];
+                df[p] = (j == 1) ? ep_df[1][p] : df[p];
+                a64[p] = (j == 1) ? ep_a64[1][p] : a64[p];
+                d[p] = (j == 1) ? ep_d[1][p] : d[p];
             }
-            if (pairs >= 3)
+        }
+        if (pairs >= 3)
+        {
+            scale = (j == 2) ? proj_scale[2] : scale;
+            for (uniform int p=0; p<channels; p++)
             {
-                ep_a[p] = (j == 2) ? ep[16+p] : ep_a[p];
-                ep_b[p] = (j == 2) ? ep[20+p] : ep_b[p];
+                af[p] = (j == 2) ? ep_af[2][p] : af[p];
+                df[p] = (j == 2) ? ep_df[2][p] : df[p];
+                a64[p] = (j == 2) ? ep_a64[2][p] : a64[p];
+                d[p] = (j == 2) ? ep_d[2][p] : d[p];
             }
         }
 
 		float proj = 0;
-		float div = 0;
 		for (uniform int p=0; p<channels; p++)
-        {
-            proj += (block[k+p*16]-ep_a[p])*(ep_b[p]-ep_a[p]);
-            div += sq(ep_b[p]-ep_a[p]);
-        }
-        
-        proj /= div;
-        		
-		int q1 = (int)(proj*levels+0.5);
+            proj += (block[k+p*16]-af[p])*df[p];
+
+		int q1 = (int)(proj*scale+0.5);
 		q1 = clamp(q1, 1, levels-1);
-		
-		float err0 = 0;
-		float err1 = 0;
+
 		int w0 = (int)((q1-1)*wscale+0.5f);
 		int w1 = (int)(q1*wscale+0.5f);
 
+		float err0 = 0;
+		float err1 = 0;
 		for (uniform int p=0; p<channels; p++)
 		{
-			float dec_v0 = (int)(((64-w0)*ep_a[p] + w0*ep_b[p] + 32)/64);
-			float dec_v1 = (int)(((64-w1)*ep_a[p] + w1*ep_b[p] + 32)/64);
+			float dec_v0 = (a64[p] + w0*d[p]) >> 6;
+			float dec_v1 = (a64[p] + w1*d[p]) >> 6;
 			err0 += sq(dec_v0 - block[k+p*16]);
 			err1 += sq(dec_v1 - block[k+p*16]);
 		}
-		
+
 		int best_err = err1;
 		int best_q = q1;
 		if (err0<err1)
@@ -1513,7 +1580,7 @@ inline void bc7_enc_mode13(bc7_enc_state state[])
 	int part_list[64];
 	for (uniform int part=0; part<64; part++)
 	{
-		int mask = get_pattern_mask(part+0, 0);
+		uniform int mask = extract(get_pattern_mask(part+0, 0), 0);
 		float bound12 = block_pca_bound_split(state->block, mask, full_stats, 3);
 		int bound = (int)(bound12);
 		part_list[part] = part+bound*64;
@@ -1534,7 +1601,7 @@ inline void bc7_enc_mode7(bc7_enc_state state[])
 	int part_list[64];
 	for (uniform int part=0; part<64; part++)
 	{
-		int mask = get_pattern_mask(part+0, 0);
+		uniform int mask = extract(get_pattern_mask(part+0, 0), 0);
 		float bound12 = block_pca_bound_split(state->block, mask, full_stats, state->channels);
 		int bound = (int)(bound12);
 		part_list[part] = part+bound*64;
@@ -2372,7 +2439,7 @@ inline void bc6h_enc_2p(bc6h_enc_state state[])
     int part_list[32];
     for (uniform int part = 0; part < 32; part++)
     {
-        int mask = get_pattern_mask(part, 0);
+        uniform int mask = extract(get_pattern_mask(part, 0), 0);
         float bound12 = block_pca_bound_split(state->block, mask, full_stats, 3);
         int bound = (int)(bound12);
         part_list[part] = part + bound * 64;
