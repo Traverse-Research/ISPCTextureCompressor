@@ -3829,10 +3829,29 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
 
         uniform int packed = (level1 * 16 + level2) * 16 + level3;
 
+        // Only tables whose exact error is within 2 * margin of the exact minimum can hold the float
+        // minimum (same bound as in pass 1), so the others are skipped when no lane needs them.
+        bool table_needed[8];
+        {
+            int u = (y_total - y_prefix[level3]) - y_prefix[level1];
+            int v = (y_prefix[level3] - y_prefix[level2]) - (y_prefix[level2] - y_prefix[level1]);
+            int r[8];
+            int rmin = 0x7FFFFFFF;
+            for (uniform int table_level = 0; table_level < 8; table_level++)
+            {
+                r[table_level] = pass1->K[idx][table_level] + pass1->D[idx][table_level] * y_total6
+                    - (48 * etc1_codeword_a[table_level]) * u - (48 * etc1_codeword_b[table_level]) * v;
+                rmin = min(rmin, r[table_level]);
+            }
+            for (uniform int table_level = 0; table_level < 8; table_level++)
+                table_needed[table_level] = r[table_level] <= rmin + 2 * 72;
+        }
+
         float t_err = sq(256) * 8;
 #define ETC1_TABLE_SEARCH(NQ) \
         for (uniform int table_level = 0; table_level < 8; table_level++) \
         { \
+            if (!any(table_needed[table_level])) continue; \
             float center = 0; \
             for (uniform int j = 0; j < NQ; j++) center += sum[j] - get_etc1_dY(table_level, qidx[j]) * count[j]; \
             center /= 8; \
