@@ -1742,8 +1742,18 @@ inline void bc7_enc_mode7(bc7_enc_state state[])
 {
     if (state->fastSkipTreshold_mode7 == 0) return;
 
+	// Mode 7 keeps the PCA bound: ranking RGBA with the bbox estimate gives alpha the same
+	// weight as each colour channel and measurably loses alpha accuracy.
 	int part_list[64];
-	bc7_rank_partitions(part_list, state->block, 0, 64, 2, 4, state->channels, state->fastSkipTreshold_mode7);
+	float full_stats[15];
+	compute_stats_masked(full_stats, state->block, -1, state->channels);
+	for (uniform int part=0; part<64; part++)
+	{
+		uniform int mask = extract(get_pattern_mask(part+0, 0), 0);
+		float bound12 = block_pca_bound_split(state->block, mask, full_stats, state->channels);
+		int bound = (int)(bound12);
+		part_list[part] = part+bound*64;
+	}
 
 	partial_sort_list(part_list, 64, state->fastSkipTreshold_mode7);
 	bc7_enc_mode01237(state, 7, part_list, state->fastSkipTreshold_mode7, NULL);
