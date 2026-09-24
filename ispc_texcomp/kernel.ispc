@@ -999,18 +999,17 @@ inline void block_segment_core(float ep[], float block[64], int mask, uniform in
 	ext[1] = -1e99;
 
 	// find min/max
-	int mask_shifted = mask<<1;
 	for (uniform int k=0; k<16; k++)
 	{
-		mask_shifted >>= 1;
-		if ((mask_shifted&1) == 0) continue;
+		// branch-free masking: varying control flow is expensive in ISPC
+		bool in_subset = ((mask>>k)&1) != 0;
 
 		float dot = 0;
 		for (uniform int p=0; p<channels; p++)
 			dot += axis[p]*(block[16*p+k]-dc[p]);
 
-		ext[0] = min(ext[0], dot);
-        ext[1] = max(ext[1], dot);
+		ext[0] = in_subset ? min(ext[0], dot) : ext[0];
+        ext[1] = in_subset ? max(ext[1], dot) : ext[1];
 	}
 
 	// create some distance if the endpoints collapse
@@ -1739,15 +1738,8 @@ inline float opt_channel(bc7_enc_state state[], uint32 qblock[2], int qep[2], fl
 	return err;
 }
 
-inline void bc7_enc_mode45_candidate(bc7_enc_state state[], mode45_parameters best_candidate[], 
-	float best_err[], uniform int mode, uniform int rotation, uniform int swap)
+inline void bc7_mode45_rotate(float block[48], float ep_seg[8], bc7_enc_state state[], uniform int rotation)
 {
-	uniform int bits = 2; 
-    uniform int abits = 2;   if (mode==4) abits = 3;
-	uniform int aepbits = 8; if (mode==4) aepbits = 6;
-	if (swap==1) { bits = 3; abits = 2; } // (mode 4)
-
-	float block[48];
 	for (uniform int k=0; k<16; k++)
 	{
 		for (uniform int p=0; p<3; p++)
@@ -1760,9 +1752,22 @@ inline void bc7_enc_mode45_candidate(bc7_enc_state state[], mode45_parameters be
 			if (state->channels == 3) block[k+rotation*16] = 255;
 		}
 	}
-	
+
+	// The PCA segment of the rotated block is shared by every mode 4/5 candidate
+	// with this rotation; only the quantization differs between them.
+	block_segment(ep_seg, block, -1, 3);
+}
+
+inline void bc7_enc_mode45_candidate(bc7_enc_state state[], mode45_parameters best_candidate[], 
+	float best_err[], uniform int mode, uniform int rotation, uniform int swap, float block[48], float ep_seg[8])
+{
+	uniform int bits = 2; 
+    uniform int abits = 2;   if (mode==4) abits = 3;
+	uniform int aepbits = 8; if (mode==4) aepbits = 6;
+	if (swap==1) { bits = 3; abits = 2; } // (mode 4)
+
 	float ep[8];
-	block_segment(ep, block, -1, 3);
+	for (uniform int i=0; i<8; i++) ep[i] = ep_seg[i];
 
 	int qep[8];
 	ep_quant_dequant(qep, ep, mode, 3);
@@ -1805,10 +1810,15 @@ inline void bc7_enc_mode45(bc7_enc_state state[])
 	memset(&best_candidate, 0, sizeof(mode45_parameters));
 
     uniform int channel0 = state->mode45_channel0;
+	float blocks[4][48];
+	float ep_segs[4][8];
+	for (uniform int p=channel0; p<state->channels; p++)
+		bc7_mode45_rotate(blocks[p], ep_segs[p], state, p);
+
 	for (uniform int p=channel0; p<state->channels; p++)
 	{
-    	bc7_enc_mode45_candidate(state, &best_candidate, &best_err, 4, p, 0);
-		bc7_enc_mode45_candidate(state, &best_candidate, &best_err, 4, p, 1);
+    	bc7_enc_mode45_candidate(state, &best_candidate, &best_err, 4, p, 0, blocks[p], ep_segs[p]);
+		bc7_enc_mode45_candidate(state, &best_candidate, &best_err, 4, p, 1, blocks[p], ep_segs[p]);
 	}
 
 	// mode 4
@@ -1820,7 +1830,7 @@ inline void bc7_enc_mode45(bc7_enc_state state[])
     
     for (uniform int p=channel0; p<state->channels; p++)
 	{
-		bc7_enc_mode45_candidate(state, &best_candidate, &best_err, 5, p, 0);
+		bc7_enc_mode45_candidate(state, &best_candidate, &best_err, 5, p, 0, blocks[p], ep_segs[p]);
 	}
 
 	// mode 5
