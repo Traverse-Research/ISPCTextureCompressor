@@ -965,12 +965,13 @@ inline void compute_covar_dc_masked(float covar[6], float dc[3], float block[64]
 	for (uniform int p=0; p<channels; p++) dc[p] = stats[10+p]/stats[14];
 }
 
-inline void block_pca_axis(float axis[4], float dc[4], float block[64], int mask, uniform int channels)
+inline void block_pca_axis_stats(float axis[4], float dc[4], float stats[15], uniform int channels)
 {
 	uniform const int powerIterations = 8; // 4 not enough for HQ
 
     float covar[10];
-	compute_covar_dc_masked(covar, dc, block, mask, channels);
+	covar_from_stats(covar, stats, channels);
+	for (uniform int p=0; p<channels; p++) dc[p] = stats[10+p]/stats[14];
 
     //float var = covar[0] + covar[4] + covar[7] + covar[9] + 256;
     float inv_var = 1.0 / (256 * 256);
@@ -988,11 +989,18 @@ inline void block_pca_axis(float axis[4], float dc[4], float block[64], int mask
 	compute_axis(axis, covar, powerIterations, channels);
 }
 
-inline void block_segment_core(float ep[], float block[64], int mask, uniform int channels)
+inline void block_pca_axis(float axis[4], float dc[4], float block[64], int mask, uniform int channels)
+{
+	float stats[15];
+	compute_stats_masked(stats, block, mask, channels);
+	block_pca_axis_stats(axis, dc, stats, channels);
+}
+
+inline void block_segment_core_stats(float ep[], float block[64], int mask, float stats[15], uniform int channels)
 {
 	float axis[4];
 	float dc[4];
-	block_pca_axis(axis, dc, block, mask, channels);
+	block_pca_axis_stats(axis, dc, stats, channels);
 	
 	float ext[2];
 	ext[0] = +1e99;
@@ -1024,6 +1032,45 @@ inline void block_segment_core(float ep[], float block[64], int mask, uniform in
 	{
         ep[4*i+p] = ext[i]*axis[p]+dc[p];
     }
+}
+
+inline void block_segment_core(float ep[], float block[64], int mask, uniform int channels)
+{
+	float stats[15];
+	compute_stats_masked(stats, block, mask, channels);
+	block_segment_core_stats(ep, block, mask, stats, channels);
+}
+
+// Segments every subset of a partition. The statistics of the last subset are derived as
+// full-block statistics minus the other subsets' (exact for integer-valued pixels).
+inline void block_segment_partition(float ep[], float block[64], int part_id, float full_stats[15], uniform int pairs, uniform int channels, uniform bool clamp_ep)
+{
+	float rest[15];
+	for (uniform int i=0; i<15; i++) rest[i] = full_stats[i];
+
+	for (uniform int j=0; j<pairs; j++)
+	{
+		int mask = get_pattern_mask(part_id, j);
+		float stats[15];
+		if (j < pairs-1)
+		{
+			compute_stats_masked(stats, block, mask, channels);
+			for (uniform int i=0; i<15; i++) rest[i] -= stats[i];
+		}
+		else
+		{
+			for (uniform int i=0; i<15; i++) stats[i] = rest[i];
+		}
+		block_segment_core_stats(&ep[j*8], block, mask, stats, channels);
+	}
+
+	if (clamp_ep)
+	for (uniform int j=0; j<pairs; j++)
+	for (uniform int i=0; i<2; i++)
+	for (uniform int p=0; p<channels; p++)
+	{
+		ep[j*8+4*i+p] = clamp(ep[j*8+4*i+p], 0, 255);
+	}
 }
 
 inline void block_segment(float ep[], float block[64], int mask, uniform int channels)
@@ -1452,7 +1499,7 @@ inline float compute_opaque_err(float block[64], uniform int channels)
     return err;
 }
 
-inline float bc7_enc_mode01237_part_fast(int qep[24], uint32 qblock[2], float block[64], int part_id, uniform int mode, float seg[])
+inline float bc7_enc_mode01237_part_fast(int qep[24], uint32 qblock[2], float block[64], int part_id, uniform int mode, float seg[], float full_stats[15])
 {
 	uint32 pattern = get_pattern(part_id);
 	uniform int bits = 2;  if (mode == 0 || mode == 1) bits = 3;
@@ -1467,11 +1514,7 @@ inline float bc7_enc_mode01237_part_fast(int qep[24], uint32 qblock[2], float bl
 	}
 	else
 	{
-		for (uniform int j=0; j<pairs; j++)
-		{
-			int mask = get_pattern_mask(part_id, j);
-			block_segment(&ep[j*8], block, mask, channels);
-		}
+		block_segment_partition(ep, block, part_id, full_stats, pairs, channels, true);
 	}
 
 	ep_quant_dequant(qep, ep, mode, channels);
@@ -1492,6 +1535,9 @@ inline void bc7_enc_mode01237(bc7_enc_state state[], uniform int mode, int part_
 	int best_part_id = -1;
 	float best_err = 1e99;
 
+	float full_stats[15];
+	compute_stats_masked(full_stats, state->block, -1, channels);
+
 	for (uniform int part=0; part<part_count; part++)
 	{
 		int part_id = part_list[part]&63;
@@ -1499,7 +1545,7 @@ inline void bc7_enc_mode01237(bc7_enc_state state[], uniform int mode, int part_
 
 		int qep[24];
 		uint32 qblock[2];
-		float err = bc7_enc_mode01237_part_fast(qep, qblock, state->block, part_id, mode, segs != NULL ? &segs[part*16] : NULL);
+		float err = bc7_enc_mode01237_part_fast(qep, qblock, state->block, part_id, mode, segs != NULL ? &segs[part*16] : NULL, full_stats);
         
 		if (err<best_err)
 		{
@@ -1601,11 +1647,7 @@ inline void bc7_enc_mode13(bc7_enc_state state[])
 	for (uniform int part=0; part<shared_count; part++)
 	{
 		int part_id = part_list[part]&63;
-		for (uniform int j=0; j<2; j++)
-		{
-			int mask = get_pattern_mask(part_id, j);
-			block_segment(&segs[part*16+j*8], state->block, mask, 3);
-		}
+		block_segment_partition(&segs[part*16], state->block, part_id, full_stats, 2, 3, true);
 	}
 
 	bc7_enc_mode01237(state, 1, part_list, state->fastSkipTreshold_mode1, segs);
@@ -2387,6 +2429,8 @@ inline float bc6h_enc_2p_part_fast(bc6h_enc_state state[], int qep[16], uint32 q
     uniform int pairs = 2;
     uniform int channels = 3;
 
+    // Unlike BC7, don't derive the second subset's stats by subtraction: BC6H values are
+    // up to 65535, so the float sums of squares aren't exact and cancellation hurts.
     float ep[16];
     for (uniform int j = 0; j<pairs; j++)
     {
