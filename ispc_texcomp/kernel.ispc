@@ -3657,6 +3657,7 @@ inline void etc1_partial_sort_list(int list[], uniform int length, uniform int p
 inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pixels[], uniform int fastSkipTreshold)
 {
     float y_sorted[8];
+    int y_sorted_int[8];
     {
         int keys[8];
         for (uniform int k = 0; k < 8; k++)
@@ -3686,7 +3687,10 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
         etc1_cmp_swap(keys, 1, 2); etc1_cmp_swap(keys, 3, 4); etc1_cmp_swap(keys, 5, 6);
 
         for (uniform int k = 0; k < 8; k++)
+        {
+            y_sorted_int[k] = keys[k] >> 4;
             y_sorted[k] = (keys[k] >> 4) / 3.0f;
+        }
     }
 
     // Per-range cluster statistics over sorted values [a, b), accumulated in the same order as
@@ -3709,8 +3713,71 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
         }
     }
 
+    // Pass 1: exact integer evaluation of the real-valued (unrounded) candidate error.
+    // With Y = 3*y (integer luma sums), cluster sums Ysum_q, counts c_q and dY = (-a, -b, b, a):
+    //   72 * err_t = 8*sum(Y^2) + 72*sum(c_q dY_q^2) - (Ytot - 3*sum(c_q dY_q))^2 - 48*sum(Ysum_q dY_q)
+    // The float evaluation below differs from err_t/72 only by rounding, so it gives tight
+    // bounds on the float key and lets pass 2 skip candidates that cannot reach the top-k.
     uniform bool use_topk = fastSkipTreshold >= 1 && fastSkipTreshold <= ETC1_MAX_TOPK;
     int topk[ETC1_MAX_TOPK];
+    for (uniform int i = 0; i < ETC1_MAX_TOPK; i++) topk[i] = 0x7FFFFFFF;
+
+    int y_prefix[9];
+    int sum_y2 = 0;
+    y_prefix[0] = 0;
+    for (uniform int k = 0; k < 8; k++)
+    {
+        int Y = y_sorted_int[k];
+        y_prefix[k + 1] = y_prefix[k] + Y;
+        sum_y2 += Y * Y;
+    }
+    int y_total = y_prefix[8];
+    int base72 = 8 * sum_y2;
+
+    int lb_key[165];
+    {
+        uniform int idx = -1;
+        for (uniform int level1 = 0; level1 <= 8; level1++)
+        for (uniform int level2 = level1; level2 <= 8; level2++)
+        for (uniform int level3 = level2; level3 <= 8; level3++)
+        {
+            idx++;
+            uniform int c0 = level1, c1 = level2 - level1, c2 = level3 - level2, c3 = 8 - level3;
+            int u = (y_total - y_prefix[level3]) - y_prefix[level1];
+            int v = (y_prefix[level3] - y_prefix[level2]) - (y_prefix[level2] - y_prefix[level1]);
+
+            int best = 0x7FFFFFFF;
+            for (uniform int table_level = 0; table_level < 8; table_level++)
+            {
+                uniform int a = get_etc1_dY(table_level, 3);
+                uniform int b = get_etc1_dY(table_level, 2);
+                uniform int D = (c3 - c0) * a + (c2 - c1) * b;
+                uniform int E72 = 72 * ((c0 + c3) * a * a + (c1 + c2) * b * b);
+                int w = y_total - 3 * D;
+                int r = base72 + E72 - w * w - 48 * (a * u + b * v);
+                best = min(best, r);
+            }
+            // |float t_err - best/72| is below 0.15 on test data; the rounding error analysis gives < 0.5.
+            // A margin of 1.0 keeps the bounds conservative.
+            float approx = (float)best / 72;
+            int lb = (((int)(approx - 1.0f)) << 12) + ((level1 * 16 + level2) * 16 + level3);
+            int ub = (((int)(approx + 1.0f)) << 12) + ((level1 * 16 + level2) * 16 + level3);
+            lb_key[idx] = lb;
+            if (use_topk && any(ub < topk[fastSkipTreshold - 1]))
+            {
+                for (uniform int i = 0; i < fastSkipTreshold; i++)
+                {
+                    int t = topk[i];
+                    topk[i] = min(t, ub);
+                    ub = max(t, ub);
+                }
+            }
+        }
+    }
+
+    // Pass 2: exact float evaluation (bit-identical to the reference) of every candidate whose
+    // lower bound can still beat the k-th smallest upper bound in some lane.
+    int key_bound = topk[clamp(fastSkipTreshold, 1, ETC1_MAX_TOPK) - 1];
     for (uniform int i = 0; i < ETC1_MAX_TOPK; i++) topk[i] = 0x7FFFFFFF;
 
     uniform int idx = -1;
@@ -3719,6 +3786,7 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
     for (uniform int level3 = level2; level3 <= 8; level3++)
     {
         idx++;
+        if (use_topk && all(lb_key[idx] > key_bound)) continue;
 
         uniform int lo[4] = { 0, level1, level2, level3 };
         uniform int hi[4] = { level1, level2, level3, 8 };
