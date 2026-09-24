@@ -3732,7 +3732,8 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
         sum_y2 += Y * Y;
     }
     int y_total = y_prefix[8];
-    int base72 = 8 * sum_y2;
+    int base72 = 8 * sum_y2 - y_total * y_total;
+    int y_total6 = 6 * y_total;
 
     int lb_key[165];
     {
@@ -3746,20 +3747,22 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
             int u = (y_total - y_prefix[level3]) - y_prefix[level1];
             int v = (y_prefix[level3] - y_prefix[level2]) - (y_prefix[level2] - y_prefix[level1]);
 
+            // 72 err_t = base72 - y_total^2 + 6 y_total D - 9 D^2 + 72 E - 48 (a u + b v)
+            //   with D = sum(c_q dY_q), E = sum(c_q dY_q^2)
             int best = 0x7FFFFFFF;
             for (uniform int table_level = 0; table_level < 8; table_level++)
             {
                 uniform int a = get_etc1_dY(table_level, 3);
                 uniform int b = get_etc1_dY(table_level, 2);
                 uniform int D = (c3 - c0) * a + (c2 - c1) * b;
-                uniform int E72 = 72 * ((c0 + c3) * a * a + (c1 + c2) * b * b);
-                int w = y_total - 3 * D;
-                int r = base72 + E72 - w * w - 48 * (a * u + b * v);
+                uniform int K = 72 * ((c0 + c3) * a * a + (c1 + c2) * b * b) - 9 * D * D;
+                int r = K + D * y_total6 - (48 * a) * u - (48 * b) * v;
                 best = min(best, r);
             }
+            best += base72;
             // |float t_err - best/72| is below 0.15 on test data; the rounding error analysis gives < 0.5.
             // A margin of 1.0 keeps the bounds conservative.
-            float approx = (float)best / 72;
+            float approx = (float)best * (1.0f / 72);
             int lb = (((int)(approx - 1.0f)) << 12) + ((level1 * 16 + level2) * 16 + level3);
             int ub = (((int)(approx + 1.0f)) << 12) + ((level1 * 16 + level2) * 16 + level3);
             lb_key[idx] = lb;
