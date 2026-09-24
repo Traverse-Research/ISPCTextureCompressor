@@ -3737,16 +3737,27 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
         float base_err = 0;
         for (uniform int q = 0; q < 4; q++) base_err += range_base[lo[q]][hi[q]];
 
+        // Empty clusters contribute exactly +0 to center and err, so only visit the non-empty ones.
+        uniform int nq = 0;
+        uniform int qidx[4];
+        for (uniform int q = 0; q < 4; q++)
+            if (count[q] > 0) qidx[nq++] = q;
+
         float t_err = sq(256) * 8;
         for (uniform int table_level = 0; table_level < 8; table_level++)
         {
             float center = 0;
-            for (uniform int q = 0; q < 4; q++) center += sum[q] - get_etc1_dY(table_level, q) * count[q];
+            for (uniform int j = 0; j < nq; j++)
+            {
+                uniform int q = qidx[j];
+                center += sum[q] - get_etc1_dY(table_level, q) * count[q];
+            }
             center /= 8;
 
             float err = base_err;
-            for (uniform int q = 0; q < 4; q++)
+            for (uniform int j = 0; j < nq; j++)
             {
+                uniform int q = qidx[j];
                 err += sq(center + get_etc1_dY(table_level, q) - sum[q] * inv_count[q])*count[q];
             }
 
