@@ -1618,14 +1618,89 @@ inline void partial_sort_list(int list[], uniform int length, uniform int partia
 	}
 }
 
+// Cheap partition estimate (after bc7e's color_cell_compression_est): approximate each
+// subset's endpoints by the corners of its bounding box, quantize the pixels along that
+// diagonal with the mode's index precision and sum the squared error. The partition is
+// uniform across the gang, so subset membership is a uniform branch (no gathers).
+inline float bc7_partition_estimate(float block[64], uniform uint32 pattern, uniform int pairs, uniform int levels, uniform int channels)
+{
+	// Per subset: two passes over its pixels. Keeping the subset loop outermost keeps the
+	// bounding box in registers (indexing lo/hi by a per-pixel subset puts them on the stack).
+	float total = 0;
+	uniform float inv_n = 1.0f / (levels - 1);
+	for (uniform int j=0; j<pairs; j++)
+	{
+		float lo[4], hi[4];
+		for (uniform int p=0; p<channels; p++) { lo[p] = 255; hi[p] = 0; }
+		for (uniform int k=0; k<16; k++)
+		{
+			if (((pattern >> (2*k)) & 3) != j) continue;
+			for (uniform int p=0; p<channels; p++)
+			{
+				lo[p] = min(lo[p], block[k+p*16]);
+				hi[p] = max(hi[p], block[k+p*16]);
+			}
+		}
+
+		float dir[4];
+		float low = 0, high = 0;
+		for (uniform int p=0; p<channels; p++)
+		{
+			dir[p] = hi[p] - lo[p];
+			low += dir[p]*lo[p];
+			high += dir[p]*hi[p];
+		}
+		// degenerate (single colour) subsets reproduce exactly: t = 0 gives lo
+		float scale = (high > low) ? (levels - 1) / (high - low) : 0.0f;
+
+		for (uniform int k=0; k<16; k++)
+		{
+			if (((pattern >> (2*k)) & 3) != j) continue;
+			float d = 0;
+			for (uniform int p=0; p<channels; p++) d += dir[p]*block[k+p*16];
+			float t = clamp(floor((d - low)*scale + 0.5f)*inv_n, 0.0f, 1.0f);
+			for (uniform int p=0; p<channels; p++)
+				total += sq(lo[p] + dir[p]*t - block[k+p*16]);
+		}
+	}
+	return total;
+}
+
+inline uniform uint32 get_pattern_uniform(uniform int part_id)
+{
+	return extract(get_pattern(part_id), 0);
+}
+
+// Ranks `count` partitions (ids first_id..first_id+count) by the bbox estimate into list[],
+// packed as (estimate << 6) | index like the PCA-bound lists.
+inline void bc7_rank_partitions(int list[], float block[64], uniform int first_id, uniform int count, uniform int pairs, uniform int levels, uniform int channels)
+{
+	for (uniform int part=0; part<count; part++)
+	{
+		float e = bc7_partition_estimate(block, get_pattern_uniform(first_id + part), pairs, levels, channels);
+		list[part] = part + ((int)min(e, 30000000.0f))*64;
+	}
+}
+
 inline void bc7_enc_mode02(bc7_enc_state state[])
 {
-	int part_list[64];
-	for (uniform int part=0; part<64; part++)
-		part_list[part] = part;
+	// Rank the 3-subset partitions with the bbox estimate and only fully evaluate the most
+	// promising ones (bc7e evaluates a single one). The number follows the mode 3 candidate
+	// count: a quarter of it for mode 0's 16 partitions, all of it for mode 2's 64.
+	uniform int mode0_count = clamp(state->fastSkipTreshold_mode3 / 4, 1, 16);
+	int mode0_list[16];
+	bc7_rank_partitions(mode0_list, state->block, 64, 16, 3, 8, 3);
+	partial_sort_list(mode0_list, 16, mode0_count);
+	bc7_enc_mode01237(state, 0, mode0_list, mode0_count, NULL);
 
-	bc7_enc_mode01237(state, 0, part_list, 16, NULL); 
-	if (!state->skip_mode2) bc7_enc_mode01237(state, 2, part_list, 64, NULL); // usually not worth the time
+	if (!state->skip_mode2) // usually not worth the time
+	{
+		uniform int mode2_count = clamp(state->fastSkipTreshold_mode3, 1, 64);
+		int mode2_list[64];
+		bc7_rank_partitions(mode2_list, state->block, 64, 64, 3, 4, 3);
+		partial_sort_list(mode2_list, 64, mode2_count);
+		bc7_enc_mode01237(state, 2, mode2_list, mode2_count, NULL);
+	}
 }
 
 inline void bc7_enc_mode13(bc7_enc_state state[])
@@ -1636,18 +1711,16 @@ inline void bc7_enc_mode13(bc7_enc_state state[])
 	compute_stats_masked(full_stats, state->block, -1, 3);
 
 	int part_list[64];
-	for (uniform int part=0; part<64; part++)
-	{
-		uniform int mask = extract(get_pattern_mask(part+0, 0), 0);
-		float bound12 = block_pca_bound_split(state->block, mask, full_stats, 3);
-		int bound = (int)(bound12);
-		part_list[part] = part+bound*64;
-	}
+	// Rank partitions with the bbox estimate (after bc7e). It costs slightly more than the
+	// PCA bound it replaces but predicts the final error better, so fewer candidates need a
+	// full evaluation for the same quality.
+	uniform int scan_count = 64;
+	bc7_rank_partitions(part_list, state->block, 0, scan_count, 2, 8, 3);
 
-	partial_sort_list(part_list, 64, max(state->fastSkipTreshold_mode1, state->fastSkipTreshold_mode3));
+	partial_sort_list(part_list, scan_count, min(scan_count, max(state->fastSkipTreshold_mode1, state->fastSkipTreshold_mode3)));
 	// Modes 1 and 3 share the same ranked partition list and the same PCA segments per
 	// partition; only the endpoint/index quantization differs, so segment once.
-	uniform int shared_count = max(state->fastSkipTreshold_mode1, state->fastSkipTreshold_mode3);
+	uniform int shared_count = min(scan_count, max(state->fastSkipTreshold_mode1, state->fastSkipTreshold_mode3));
 	float segs[64*16];
 	for (uniform int part=0; part<shared_count; part++)
 	{
@@ -1655,25 +1728,16 @@ inline void bc7_enc_mode13(bc7_enc_state state[])
 		block_segment_partition(&segs[part*16], state->block, part_id, full_stats, 2, 3, true);
 	}
 
-	bc7_enc_mode01237(state, 1, part_list, state->fastSkipTreshold_mode1, segs);
-	bc7_enc_mode01237(state, 3, part_list, state->fastSkipTreshold_mode3, segs);
+	bc7_enc_mode01237(state, 1, part_list, min(scan_count, state->fastSkipTreshold_mode1), segs);
+	bc7_enc_mode01237(state, 3, part_list, min(scan_count, state->fastSkipTreshold_mode3), segs);
 }
 
 inline void bc7_enc_mode7(bc7_enc_state state[])
 {
     if (state->fastSkipTreshold_mode7 == 0) return;
 
-	float full_stats[15];
-	compute_stats_masked(full_stats, state->block, -1, state->channels);
-
 	int part_list[64];
-	for (uniform int part=0; part<64; part++)
-	{
-		uniform int mask = extract(get_pattern_mask(part+0, 0), 0);
-		float bound12 = block_pca_bound_split(state->block, mask, full_stats, state->channels);
-		int bound = (int)(bound12);
-		part_list[part] = part+bound*64;
-	}
+	bc7_rank_partitions(part_list, state->block, 0, 64, 2, 4, state->channels);
 
 	partial_sort_list(part_list, 64, state->fastSkipTreshold_mode7);
 	bc7_enc_mode01237(state, 7, part_list, state->fastSkipTreshold_mode7, NULL);
