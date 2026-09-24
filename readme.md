@@ -10,9 +10,9 @@ Changes so far:
 
 * **ETC1:** fixed an uninitialized-memory bug in `compress_etc1_half_7` that
   could make every candidate error NaN and abort on `assert(v<pow2(bits))`.
-* **Performance (in progress, [`arm64-perf`](https://github.com/Traverse-Research/ISPCTextureCompressor/tree/arm64-perf)):**
-  single-threaded speedups for BC6H, BC7 and ETC1 on ARM64/NEON at unchanged
-  output quality, measured on Apple Silicon.
+* **Performance:** single-threaded speedups for BC6H, BC7 and ETC1 on
+  ARM64/NEON at unchanged output quality, measured on Apple Silicon. Work on
+  further optimizations is ongoing.
 
 Issues and pull requests are welcome in this repository.
 
