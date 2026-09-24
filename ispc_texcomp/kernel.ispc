@@ -3436,34 +3436,34 @@ inline uniform int get_etc1_dY(uniform int table, uniform int q)
 
 uniform int remap_q[] = { 2, 3, 1, 0 };
 
-int get_remap2_q(int x)
+inline int get_remap2_q(int x)
 {
     x -= 2;
     if (x < 0) x = 1 - x;
     return x;
 }
 
-int extend_4to8bits(int value)
+inline int extend_4to8bits(int value)
 {
     return (value << 4) | value;
 }
 
-int extend_5to8bits(int value)
+inline int extend_5to8bits(int value)
 {
     return (value << 3) | (value >> 2);
 }
 
-int quantize_4bits(float value)
+inline int quantize_4bits(float value)
 {
     return clamp((value / 255.0f) * 15 + 0.5, 0, 15);
 }
 
-int quantize_5bits(float value)
+inline int quantize_5bits(float value)
 {
     return clamp((value / 255.0f) * 31 + 0.5, 0, 31);
 }
 
-void center_quant_dequant(int qcenter[3], float center[3], uniform bool diff, int prev_qcenter[3])
+inline void center_quant_dequant(int qcenter[3], float center[3], uniform bool diff, int prev_qcenter[3])
 {
     if (diff)
     {
@@ -3571,7 +3571,7 @@ float compress_etc1_half_1(uint32 out_qbits[1], int out_table[1], int out_qcente
     return best_error;
 }
 
-float optimize_center(float colors[4][10], uniform int p, uniform int table_level)
+inline float optimize_center(float colors[4][10], uniform int p, uniform int table_level)
 {
     float best_center = 0;
     for (uniform int q = 0; q < 4; q++)
@@ -3620,7 +3620,7 @@ float optimize_center(float colors[4][10], uniform int p, uniform int table_leve
 
 // Candidate selection: depends only on the half-block pixels (not on diff mode),
 // so it is computed once per (flip, half) and shared by both diff modes.
-void etc1_half_candidates(int err_list[165], int y_sorted_inv[8], float half_pixels[], etc_enc_state state[])
+inline void etc1_half_candidates(int err_list[165], int y_sorted_inv[8], float half_pixels[], etc_enc_state state[])
 {
     float y_sorted[8];
 
@@ -3713,7 +3713,7 @@ void etc1_half_candidates(int err_list[165], int y_sorted_inv[8], float half_pix
 
 // Refines the candidate list for both diff modes at once: only the center quantization
 // (and the prev_qcenter clamping in diff mode) depends on the mode. Index m: 0 = diff, 1 = individual.
-void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcenter[6], float out_err[2],
+inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcenter[6], float out_err[2],
                       float half_pixels[], int err_list[165], int y_sorted_inv[8],
                       int prev_qcenter[3], uniform int fastSkipTreshold)
 {
@@ -3847,7 +3847,7 @@ inline uint32 bswap32(uint32 v)
     return r;
 }
 
-void etc_pack(uint32 data[], uint32 qbits[2], int tables[2], int qcenters[2][3], uniform int diff, uniform int flip)
+inline void etc_pack(uint32 data[], uint32 qbits[2], int tables[2], int qcenters[2][3], uniform int diff, uniform int flip)
 {
     for (uniform int k = 0; k < 2; k++) data[k] = 0;
     uniform int pos = 0;
