@@ -3868,7 +3868,8 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
 //   g_p(x) = sum_q c_q (clamp(x + dY_q, 0, 255) - m_qp)^2 = sum_q c_q (clip(x, -dY_q, 255 - dY_q) - t_q)^2,
 // t_q = m_qp - dY_q. If every non-empty t_q lies in all non-empty clusters' clip intervals, clamping is
 // inactive on [min t, max t], g only grows away from that range, and so g >= min_x sum_q c_q (x - t_q)^2
-// (the weighted variance of t). Otherwise the channel contributes the trivial bound 0.
+// (the weighted variance of t). In any case, as quantized centers x lie in [0, 255], clamp(x + dY_q) lies in
+// [0, 255 + dY_q] for dY_q < 0 and in [dY_q, 255] for dY_q > 0, which bounds each cluster's error from below.
 // A margin covers the float rounding of both this bound and the reference error evaluation.
 inline float etc1_table_lower_bound(float colors[4][10], float base_err, uniform int table_level)
 {
@@ -3884,6 +3885,7 @@ inline float etc1_table_lower_bound(float colors[4][10], float base_err, uniform
     {
         float tw = 0;
         float tsq = 0;
+        float sat = 0;
         bool ok = true;
         for (uniform int q = 0; q < 4; q++)
         {
@@ -3892,9 +3894,12 @@ inline float etc1_table_lower_bound(float colors[4][10], float base_err, uniform
             tw += c * t;
             tsq += c * t * t;
             ok = ok && (c == 0 || (t >= lo_max && t <= hi_min));
+            // saturation: for centers in [0, 255], clamp(x + dY_q) cannot get closer to m_q than this
+            float d = q < 2 ? t - 255 : -t;
+            sat += c * sq(max(d, 0.0f));
         }
         float var = tsq - tw * tw * (1.0f / 8);
-        if (ok) lb += var;
+        lb += ok ? max(var, sat) : sat;
     }
 
     return lb - (16 + lb * (1.0f / 16384));
