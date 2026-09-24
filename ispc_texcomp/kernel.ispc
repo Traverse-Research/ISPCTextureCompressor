@@ -3618,33 +3618,100 @@ inline float optimize_center(float colors[4][10], uniform int p, uniform int tab
     return best_center;
 }
 
+inline void etc1_cmp_swap(int list[], uniform int i, uniform int j)
+{
+    int a = list[i];
+    int b = list[j];
+    list[i] = min(a, b);
+    list[j] = max(a, b);
+}
+
+// ETC1-specific copy of partial_sort_list (only used when fastSkipTreshold > ETC1_MAX_TOPK)
+inline void etc1_partial_sort_list(int list[], uniform int length, uniform int partial_count)
+{
+    for (uniform int k = 0; k < partial_count; k++)
+    {
+        int best_idx = k;
+        int best_value = list[k];
+        for (uniform int i = k + 1; i < length; i++)
+        {
+            if (best_value > list[i])
+            {
+                best_value = list[i];
+                best_idx = i;
+            }
+        }
+
+        // swap
+        scatter_int(list, best_idx, list[k]);
+        list[k] = best_value;
+    }
+}
+
+#define ETC1_MAX_TOPK 16
+
 // Candidate selection: depends only on the half-block pixels (not on diff mode),
 // so it is computed once per (flip, half) and shared by both diff modes.
-inline void etc1_half_candidates(int err_list[165], int y_sorted_inv[8], float half_pixels[], etc_enc_state state[])
+// Outputs the fastSkipTreshold best candidates (sorted ascending) in err_list and the rank of each
+// pixel in luma-sorted order in y_rank.
+inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pixels[], uniform int fastSkipTreshold)
 {
     float y_sorted[8];
-
     {
-        int y_sorted_idx[8];
+        int keys[8];
         for (uniform int k = 0; k < 8; k++)
         {
             float value = 0;
             for (uniform int p = 0; p < 3; p++)
                 value += half_pixels[k + p * 16];
 
-            y_sorted_idx[k] = (((int)value) << 4) + k;
+            keys[k] = (((int)value) << 4) + k;
         }
 
-        partial_sort_list(y_sorted_idx, 8, 8);
+        // keys are unique (pixel index in the low bits): rank = number of smaller keys
+        for (uniform int k = 0; k < 8; k++)
+        {
+            int rank = 0;
+            for (uniform int j = 0; j < 8; j++)
+                if (keys[j] < keys[k]) rank++;
+            y_rank[k] = rank;
+        }
+
+        // 19-comparator sorting network
+        etc1_cmp_swap(keys, 0, 2); etc1_cmp_swap(keys, 1, 3); etc1_cmp_swap(keys, 4, 6); etc1_cmp_swap(keys, 5, 7);
+        etc1_cmp_swap(keys, 0, 4); etc1_cmp_swap(keys, 1, 5); etc1_cmp_swap(keys, 2, 6); etc1_cmp_swap(keys, 3, 7);
+        etc1_cmp_swap(keys, 0, 1); etc1_cmp_swap(keys, 2, 3); etc1_cmp_swap(keys, 4, 5); etc1_cmp_swap(keys, 6, 7);
+        etc1_cmp_swap(keys, 2, 4); etc1_cmp_swap(keys, 3, 5);
+        etc1_cmp_swap(keys, 1, 4); etc1_cmp_swap(keys, 3, 6);
+        etc1_cmp_swap(keys, 1, 2); etc1_cmp_swap(keys, 3, 4); etc1_cmp_swap(keys, 5, 6);
 
         for (uniform int k = 0; k < 8; k++)
-            y_sorted_inv[k] = ((y_sorted_idx[k] & 0xF) << 4) + k;
-
-        for (uniform int k = 0; k < 8; k++)
-            y_sorted[k] = (y_sorted_idx[k] >> 4) / 3.0f;
-
-        partial_sort_list(y_sorted_inv, 8, 8);
+            y_sorted[k] = (keys[k] >> 4) / 3.0f;
     }
+
+    // Per-range cluster statistics over sorted values [a, b), accumulated in the same order as
+    // a per-candidate loop would, so results are bit-identical.
+    float range_sum[9][9];
+    float range_base[9][9];
+    for (uniform int a = 0; a <= 8; a++)
+    {
+        float sum = 0;
+        float sum_sq = 0;
+        range_sum[a][a] = 0;
+        range_base[a][a] = 0;
+        for (uniform int b = a + 1; b <= 8; b++)
+        {
+            sum += y_sorted[b - 1];
+            sum_sq += sq(y_sorted[b - 1]);
+            uniform float inv_count = 1 / (uniform float)(b - a);
+            range_sum[a][b] = sum;
+            range_base[a][b] = sum_sq - sq(sum) * inv_count;
+        }
+    }
+
+    uniform bool use_topk = fastSkipTreshold <= ETC1_MAX_TOPK;
+    int topk[ETC1_MAX_TOPK];
+    for (uniform int i = 0; i < ETC1_MAX_TOPK; i++) topk[i] = 0x7FFFFFFF;
 
     uniform int idx = -1;
     for (uniform int level1 = 0; level1 <= 8; level1++)
@@ -3652,42 +3719,25 @@ inline void etc1_half_candidates(int err_list[165], int y_sorted_inv[8], float h
     for (uniform int level3 = level2; level3 <= 8; level3++)
     {
         idx++;
-        assert(idx < 165);
-        
+
+        uniform int lo[4] = { 0, level1, level2, level3 };
+        uniform int hi[4] = { level1, level2, level3, 8 };
+
         float sum[4];
-        float sum_sq[4];
-        float count[4];
-        float inv_count[4];
-
+        uniform float count[4];
+        uniform float inv_count[4];
         for (uniform int q = 0; q < 4; q++)
         {
-            sum[q] = 0;
-            sum_sq[q] = 0;
-            count[q] = 0;
+            sum[q] = range_sum[lo[q]][hi[q]];
+            count[q] = hi[q] - lo[q];
             inv_count[q] = 0;
-        }
-
-        for (uniform int k = 0; k < 8; k++)
-        {
-            uniform int q = 0;
-            if (k >= level1) q = 1;
-            if (k >= level2) q = 2;
-            if (k >= level3) q = 3;
-
-            sum[q] += y_sorted[k];
-            sum_sq[q] += sq(y_sorted[k]);
-            count[q] += 1;
-        }
-
-        for (uniform int q = 0; q < 4; q++)
-        {
             if (count[q] > 0) inv_count[q] = 1 / count[q];
         }
 
         float base_err = 0;
-        for (uniform int q = 0; q < 4; q++) base_err += sum_sq[q] - sq(sum[q]) * inv_count[q];
+        for (uniform int q = 0; q < 4; q++) base_err += range_base[lo[q]][hi[q]];
 
-        float t_err = sq(256) * 8;        
+        float t_err = sq(256) * 8;
         for (uniform int table_level = 0; table_level < 8; table_level++)
         {
             float center = 0;
@@ -3703,18 +3753,39 @@ inline void etc1_half_candidates(int err_list[165], int y_sorted_inv[8], float h
             t_err = min(t_err, err);
         }
 
-        int packed = (level1 * 16 + level2) * 16 + level3;
+        uniform int packed = (level1 * 16 + level2) * 16 + level3;
+        int key = (((int)t_err) << 12) + packed;
 
-        err_list[idx] = (((int)t_err) << 12) + packed;
+        if (use_topk)
+        {
+            // insert into the sorted list of the best fastSkipTreshold keys (keys are unique)
+            for (uniform int i = 0; i < fastSkipTreshold; i++)
+            {
+                int t = topk[i];
+                topk[i] = min(t, key);
+                key = max(t, key);
+            }
+        }
+        else
+        {
+            err_list[idx] = key;
+        }
     }
 
-    partial_sort_list(err_list, 165, state->fastSkipTreshold);
+    if (use_topk)
+    {
+        for (uniform int i = 0; i < fastSkipTreshold; i++) err_list[i] = topk[i];
+    }
+    else
+    {
+        etc1_partial_sort_list(err_list, 165, fastSkipTreshold);
+    }
 }
 
 // Refines the candidate list for both diff modes at once: only the center quantization
 // (and the prev_qcenter clamping in diff mode) depends on the mode. Index m: 0 = diff, 1 = individual.
 inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcenter[6], float out_err[2],
-                      float half_pixels[], int err_list[165], int y_sorted_inv[8],
+                      float half_pixels[], int err_list[165], int y_rank[8],
                       int prev_qcenter[3], uniform int fastSkipTreshold)
 {
     float best_error[2];
@@ -3747,7 +3818,7 @@ inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcen
         uint32 qbits = 0;
         for (uniform int kk = 0; kk < 8; kk++)
         {
-            int k = y_sorted_inv[kk] & 0xF;
+            int k = y_rank[kk];
 
             int qq = 0;
             if (k >= level1) qq = 1;
@@ -3915,8 +3986,8 @@ inline void CompressBlockETC1_core(etc_enc_state state[])
 
     int err_list[2][165];
     int y_sorted_inv[2][8];
-    etc1_half_candidates(err_list[0], y_sorted_inv[0], &pixels[0], state);
-    etc1_half_candidates(err_list[1], y_sorted_inv[1], &pixels[8], state);
+    etc1_half_candidates(err_list[0], y_sorted_inv[0], &pixels[0], state->fastSkipTreshold);
+    etc1_half_candidates(err_list[1], y_sorted_inv[1], &pixels[8], state->fastSkipTreshold);
 
     uint32 hqbits[2][2];
     int htables[2][2];
