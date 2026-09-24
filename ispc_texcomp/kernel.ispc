@@ -3860,6 +3860,43 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
     }
 }
 
+// Lower bound on the refined error of one (candidate, table) pair, for any center:
+// the error is base_err + sum_p g_p(x_p) with
+//   g_p(x) = sum_q c_q (clamp(x + dY_q, 0, 255) - m_qp)^2 = sum_q c_q (clip(x, -dY_q, 255 - dY_q) - t_q)^2,
+// t_q = m_qp - dY_q. If every non-empty t_q lies in all non-empty clusters' clip intervals, clamping is
+// inactive on [min t, max t], g only grows away from that range, and so g >= min_x sum_q c_q (x - t_q)^2
+// (the weighted variance of t). Otherwise the channel contributes the trivial bound 0.
+// A margin covers the float rounding of both this bound and the reference error evaluation.
+inline float etc1_table_lower_bound(float colors[4][10], float base_err, uniform int table_level)
+{
+    uniform float a = get_etc1_dY(table_level, 3);
+    uniform float b = get_etc1_dY(table_level, 2);
+
+    float c0 = colors[0][3], c1 = colors[1][3], c2 = colors[2][3], c3 = colors[3][3];
+    float lo_max = c0 > 0 ? a : (c1 > 0 ? b : (c2 > 0 ? -b : -a));
+    float hi_min = 255 - (c3 > 0 ? a : (c2 > 0 ? b : (c1 > 0 ? -b : -a)));
+
+    float lb = base_err;
+    for (uniform int p = 0; p < 3; p++)
+    {
+        float tw = 0;
+        float tsq = 0;
+        bool ok = true;
+        for (uniform int q = 0; q < 4; q++)
+        {
+            float c = colors[q][3];
+            float t = colors[q][7 + p] - get_etc1_dY(table_level, q);
+            tw += c * t;
+            tsq += c * t * t;
+            ok = ok && (c == 0 || (t >= lo_max && t <= hi_min));
+        }
+        float var = tsq - tw * tw * (1.0f / 8);
+        if (ok) lb += var;
+    }
+
+    return lb - (16 + lb * (1.0f / 16384));
+}
+
 // Refines the candidate list for both diff modes at once: only the center quantization
 // (and the prev_qcenter clamping in diff mode) depends on the mode. Index m: 0 = diff, 1 = individual.
 inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcenter[6], float out_err[2],
@@ -3941,6 +3978,13 @@ inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcen
 
         for (uniform int table_level = 0; table_level < 8; table_level++)
         {
+            // Skip the table when its error lower bound cannot beat the current best in any lane for
+            // either mode: the reference `err < best_error` test would fail anyway.
+            {
+                float lb = etc1_table_lower_bound(colors, base_err, table_level);
+                if (all(lb > best_error[0] && lb > best_error[1])) continue;
+            }
+
             float opt_center[3];
             for (uniform int p = 0; p < 3; p++)
             {
