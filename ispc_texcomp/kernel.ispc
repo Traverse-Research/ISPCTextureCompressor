@@ -4059,10 +4059,8 @@ inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcen
         {
             // Skip the table when its error lower bound cannot beat the current best in any lane for
             // either mode: the reference `err < best_error` test would fail anyway.
-            {
-                float lb = etc1_table_lower_bound(&prep_storage, colors, base_err, table_level);
-                if (all(lb > best_error[0] && lb > best_error[1])) continue;
-            }
+            float lb = etc1_table_lower_bound(&prep_storage, colors, base_err, table_level);
+            if (all(lb > best_error[0] && lb > best_error[1])) continue;
 
             float opt_center[3];
             for (uniform int p = 0; p < 3; p++)
@@ -4072,6 +4070,7 @@ inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcen
 
             for (uniform int m = 0; m < 2; m++)
             {
+                if (all(lb > best_error[m])) continue;
                 float center[3];
                 int qcenter[3];
                 for (uniform int p = 0; p < 3; p++) center[p] = opt_center[p];
