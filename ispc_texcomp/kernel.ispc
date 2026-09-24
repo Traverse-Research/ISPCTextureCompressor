@@ -3795,6 +3795,8 @@ struct etc1_lb_prep
     float S[3];     // sum over all 8 pixels
     float mmin[3];  // min / max of the non-empty cluster means
     float mmax[3];
+    float mlo[4][3];  // cluster means, +/- infinity for empty clusters
+    float mhi[4][3];
 };
 
 inline void etc1_lb_prepare(varying etc1_lb_prep* uniform prep, float colors[4][10])
@@ -3811,6 +3813,8 @@ inline void etc1_lb_prepare(varying etc1_lb_prep* uniform prep, float colors[4][
         {
             float m = colors[q][7 + p];
             Q += colors[q][p] * m;
+            prep->mlo[q][p] = colors[q][3] > 0 ? m : 1e9;
+            prep->mhi[q][p] = colors[q][3] > 0 ? m : -1e9;
             if (colors[q][3] > 0)
             {
                 mmin = min(mmin, m);
@@ -3944,10 +3948,39 @@ inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcen
             float lb = etc1_table_lower_bound(&prep_storage, colors, base_err, table_level);
             if (all(lb > best_error[0] && lb > best_error[1])) continue;
 
+            // clip range of the center shared by all non-empty clusters
+            float lo_max, hi_min;
+            {
+                uniform float a = etc1_codeword_a[table_level];
+                uniform float b = etc1_codeword_b[table_level];
+                float c0 = colors[0][3], c1 = colors[1][3], c2 = colors[2][3], c3 = colors[3][3];
+                lo_max = c0 > 0 ? a : (c1 > 0 ? b : (c2 > 0 ? -b : -a));
+                hi_min = 255 - (c3 > 0 ? a : (c2 > 0 ? b : (c1 > 0 ? -b : -a)));
+            }
+
             float opt_center[3];
             for (uniform int p = 0; p < 3; p++)
             {
-                opt_center[p] = optimize_center(colors, p, table_level);
+                // If clamping is inactive between the smallest and largest per-cluster ideal centers
+                // t_q = m_q - dY_q, the unclamped least-squares center (optimize_center's first candidate)
+                // is the exact minimizer and the other candidates cannot beat it (except by float rounding).
+                uniform float a = etc1_codeword_a[table_level];
+                uniform float b = etc1_codeword_b[table_level];
+                float tmin = min(min(prep_storage.mlo[0][p] + a, prep_storage.mlo[1][p] + b),
+                                 min(prep_storage.mlo[2][p] - b, prep_storage.mlo[3][p] - a));
+                float tmax = max(max(prep_storage.mhi[0][p] + a, prep_storage.mhi[1][p] + b),
+                                 max(prep_storage.mhi[2][p] - b, prep_storage.mhi[3][p] - a));
+                if (all(tmin >= lo_max && tmax <= hi_min))
+                {
+                    float center = 0;
+                    for (uniform int q = 0; q < 4; q++)
+                        center += (colors[q][7 + p] - get_etc1_dY(table_level, q)) * colors[q][3];
+                    opt_center[p] = center / 8;
+                }
+                else
+                {
+                    opt_center[p] = optimize_center(colors, p, table_level);
+                }
             }
 
             for (uniform int m = 0; m < 2; m++)
