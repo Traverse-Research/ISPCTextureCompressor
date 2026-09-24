@@ -3709,7 +3709,7 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
         }
     }
 
-    uniform bool use_topk = fastSkipTreshold <= ETC1_MAX_TOPK;
+    uniform bool use_topk = fastSkipTreshold >= 1 && fastSkipTreshold <= ETC1_MAX_TOPK;
     int topk[ETC1_MAX_TOPK];
     for (uniform int i = 0; i < ETC1_MAX_TOPK; i++) topk[i] = 0x7FFFFFFF;
 
@@ -3723,52 +3723,51 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
         uniform int lo[4] = { 0, level1, level2, level3 };
         uniform int hi[4] = { level1, level2, level3, 8 };
 
-        float sum[4];
-        uniform float count[4];
-        uniform float inv_count[4];
-        for (uniform int q = 0; q < 4; q++)
-        {
-            sum[q] = range_sum[lo[q]][hi[q]];
-            count[q] = hi[q] - lo[q];
-            inv_count[q] = 0;
-            if (count[q] > 0) inv_count[q] = 1 / count[q];
-        }
-
-        float base_err = 0;
-        for (uniform int q = 0; q < 4; q++) base_err += range_base[lo[q]][hi[q]];
-
         // Empty clusters contribute exactly +0 to center and err, so only visit the non-empty ones.
         uniform int nq = 0;
         uniform int qidx[4];
+        float sum[4];
+        uniform float count[4];
+        uniform float inv_count[4];
+        float base_err = 0;
         for (uniform int q = 0; q < 4; q++)
-            if (count[q] > 0) qidx[nq++] = q;
-
-        float t_err = sq(256) * 8;
-        for (uniform int table_level = 0; table_level < 8; table_level++)
         {
-            float center = 0;
-            for (uniform int j = 0; j < nq; j++)
+            base_err += range_base[lo[q]][hi[q]];
+            if (hi[q] > lo[q])
             {
-                uniform int q = qidx[j];
-                center += sum[q] - get_etc1_dY(table_level, q) * count[q];
+                qidx[nq] = q;
+                sum[nq] = range_sum[lo[q]][hi[q]];
+                count[nq] = hi[q] - lo[q];
+                inv_count[nq] = 1 / count[nq];
+                nq++;
             }
-            center /= 8;
-
-            float err = base_err;
-            for (uniform int j = 0; j < nq; j++)
-            {
-                uniform int q = qidx[j];
-                err += sq(center + get_etc1_dY(table_level, q) - sum[q] * inv_count[q])*count[q];
-            }
-
-            t_err = min(t_err, err);
         }
 
         uniform int packed = (level1 * 16 + level2) * 16 + level3;
+
+        float t_err = sq(256) * 8;
+#define ETC1_TABLE_SEARCH(NQ) \
+        for (uniform int table_level = 0; table_level < 8; table_level++) \
+        { \
+            float center = 0; \
+            for (uniform int j = 0; j < NQ; j++) center += sum[j] - get_etc1_dY(table_level, qidx[j]) * count[j]; \
+            center /= 8; \
+            float err = base_err; \
+            for (uniform int j = 0; j < NQ; j++) \
+                err += sq(center + get_etc1_dY(table_level, qidx[j]) - sum[j] * inv_count[j])*count[j]; \
+            t_err = min(t_err, err); \
+        }
+        if (nq == 4) { ETC1_TABLE_SEARCH(4) }
+        else if (nq == 3) { ETC1_TABLE_SEARCH(3) }
+        else if (nq == 2) { ETC1_TABLE_SEARCH(2) }
+        else { ETC1_TABLE_SEARCH(1) }
+#undef ETC1_TABLE_SEARCH
+
         int key = (((int)t_err) << 12) + packed;
 
         if (use_topk)
         {
+            if (all(key > topk[fastSkipTreshold - 1])) continue;
             // insert into the sorted list of the best fastSkipTreshold keys (keys are unique)
             for (uniform int i = 0; i < fastSkipTreshold; i++)
             {
