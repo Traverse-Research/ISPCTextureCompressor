@@ -3403,8 +3403,19 @@ struct etc_enc_settings
     int fastSkipTreshold;
 };
 
+// Per-candidate constants of the pass-1 candidate error (see etc1_half_candidates); candidates are
+// enumerated as level1 <= level2 <= level3 in 0..8 with counts c = (l1, l2 - l1, l3 - l2, 8 - l3):
+//   D = (c3 - c0) a + (c2 - c1) b,  K = 72 ((c0 + c3) a^2 + (c1 + c2) b^2) - 9 D^2  for table { -a, -b, b, a }
+struct etc1_pass1_consts
+{
+    int D[165][8];
+    int K[165][8];
+};
+
 struct etc_enc_state
 {
+    uniform etc1_pass1_consts* uniform pass1;
+
     float block[64];
     int prev_qcenter[3];
 
@@ -3435,6 +3446,10 @@ inline uniform int get_etc1_dY(uniform int table, uniform int q)
 }
 
 uniform int remap_q[] = { 2, 3, 1, 0 };
+
+// get_etc1_dY(table, 3) and get_etc1_dY(table, 2); the table is { -a, -b, b, a }
+static uniform const int etc1_codeword_a[8] = { 8, 17, 29, 42, 60, 80, 106, 183 };
+static uniform const int etc1_codeword_b[8] = { 2, 5, 9, 13, 18, 24, 33, 47 };
 
 inline int get_remap2_q(int x)
 {
@@ -3654,7 +3669,8 @@ inline void etc1_partial_sort_list(int list[], uniform int length, uniform int p
 // so it is computed once per (flip, half) and shared by both diff modes.
 // Outputs the fastSkipTreshold best candidates (sorted ascending) in err_list and the rank of each
 // pixel in luma-sorted order in y_rank.
-inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pixels[], uniform int fastSkipTreshold)
+inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pixels[], uniform int fastSkipTreshold,
+                                 uniform etc1_pass1_consts* uniform pass1)
 {
     float y_sorted[8];
     int y_sorted_int[8];
@@ -3743,7 +3759,6 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
         for (uniform int level3 = level2; level3 <= 8; level3++)
         {
             idx++;
-            uniform int c0 = level1, c1 = level2 - level1, c2 = level3 - level2, c3 = 8 - level3;
             int u = (y_total - y_prefix[level3]) - y_prefix[level1];
             int v = (y_prefix[level3] - y_prefix[level2]) - (y_prefix[level2] - y_prefix[level1]);
 
@@ -3752,11 +3767,9 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
             int best = 0x7FFFFFFF;
             for (uniform int table_level = 0; table_level < 8; table_level++)
             {
-                uniform int a = get_etc1_dY(table_level, 3);
-                uniform int b = get_etc1_dY(table_level, 2);
-                uniform int D = (c3 - c0) * a + (c2 - c1) * b;
-                uniform int K = 72 * ((c0 + c3) * a * a + (c1 + c2) * b * b) - 9 * D * D;
-                int r = K + D * y_total6 - (48 * a) * u - (48 * b) * v;
+                uniform int D = pass1->D[idx][table_level];
+                uniform int K = pass1->K[idx][table_level];
+                int r = K + D * y_total6 - (48 * etc1_codeword_a[table_level]) * u - (48 * etc1_codeword_b[table_level]) * v;
                 best = min(best, r);
             }
             best += base72;
@@ -4128,8 +4141,8 @@ inline void CompressBlockETC1_core(etc_enc_state state[])
 
     int err_list[2][165];
     int y_sorted_inv[2][8];
-    etc1_half_candidates(err_list[0], y_sorted_inv[0], &pixels[0], state->fastSkipTreshold);
-    etc1_half_candidates(err_list[1], y_sorted_inv[1], &pixels[8], state->fastSkipTreshold);
+    etc1_half_candidates(err_list[0], y_sorted_inv[0], &pixels[0], state->fastSkipTreshold, state->pass1);
+    etc1_half_candidates(err_list[1], y_sorted_inv[1], &pixels[8], state->fastSkipTreshold, state->pass1);
 
     uint32 hqbits[2][2];
     int htables[2][2];
@@ -4176,10 +4189,12 @@ void etc_enc_copy_settings(etc_enc_state state[], uniform etc_enc_settings setti
     state->fastSkipTreshold = settings->fastSkipTreshold;
 }
 
-inline void CompressBlockETC1(uniform rgba_surface src[], int xx, uniform int yy, uniform uint8 dst[], uniform etc_enc_settings settings[])
+inline void CompressBlockETC1(uniform rgba_surface src[], int xx, uniform int yy, uniform uint8 dst[], uniform etc_enc_settings settings[],
+                              uniform etc1_pass1_consts* uniform pass1)
 {
     etc_enc_state _state;
     varying etc_enc_state* uniform state = &_state;
+    state->pass1 = pass1;
 
     etc_enc_copy_settings(state, settings);
     load_block_interleaved(state->block, src, xx, yy);
@@ -4192,9 +4207,29 @@ inline void CompressBlockETC1(uniform rgba_surface src[], int xx, uniform int yy
 
 export void CompressBlocksETC1_ispc(uniform rgba_surface src[], uniform uint8 dst[], uniform etc_enc_settings settings[])
 {
+    uniform etc1_pass1_consts pass1;
+    {
+        uniform int idx = 0;
+        for (uniform int level1 = 0; level1 <= 8; level1++)
+        for (uniform int level2 = level1; level2 <= 8; level2++)
+        for (uniform int level3 = level2; level3 <= 8; level3++)
+        {
+            uniform int c0 = level1, c1 = level2 - level1, c2 = level3 - level2, c3 = 8 - level3;
+            for (uniform int t = 0; t < 8; t++)
+            {
+                uniform int a = etc1_codeword_a[t];
+                uniform int b = etc1_codeword_b[t];
+                uniform int D = (c3 - c0) * a + (c2 - c1) * b;
+                pass1.D[idx][t] = D;
+                pass1.K[idx][t] = 72 * ((c0 + c3) * a * a + (c1 + c2) * b * b) - 9 * D * D;
+            }
+            idx++;
+        }
+    }
+
     for (uniform int yy = 0; yy<src->height / 4; yy++)
     foreach(xx = 0 ... src->width / 4)
     {
-        CompressBlockETC1(src, xx, yy, dst, settings);
+        CompressBlockETC1(src, xx, yy, dst, settings, &pass1);
     }
 }
