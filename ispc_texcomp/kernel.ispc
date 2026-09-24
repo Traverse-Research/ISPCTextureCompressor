@@ -3871,7 +3871,7 @@ inline void etc1_half_candidates(int err_list[165], int y_rank[8], float half_pi
 // (the weighted variance of t). In any case, as quantized centers x lie in [0, 255], clamp(x + dY_q) lies in
 // [0, 255 + dY_q] for dY_q < 0 and in [dY_q, 255] for dY_q > 0, which bounds each cluster's error from below.
 // A margin covers the float rounding of both this bound and the reference error evaluation.
-inline float etc1_table_lower_bound(float colors[4][10], float base_err, uniform int table_level)
+inline void etc1_table_lower_bound(float out_lb[2], float colors[4][10], float base_err, uniform int table_level)
 {
     uniform float a = get_etc1_dY(table_level, 3);
     uniform float b = get_etc1_dY(table_level, 2);
@@ -3881,28 +3881,39 @@ inline float etc1_table_lower_bound(float colors[4][10], float base_err, uniform
     float hi_min = 255 - (c3 > 0 ? a : (c2 > 0 ? b : (c1 > 0 ? -b : -a)));
 
     float lb = base_err;
+    float lb4 = base_err;
     for (uniform int p = 0; p < 3; p++)
     {
         float tw = 0;
         float tsq = 0;
         float sat = 0;
-        bool ok = true;
+        float tmin = 1e9;
+        float tmax = -1e9;
         for (uniform int q = 0; q < 4; q++)
         {
             float c = colors[q][3];
             float t = colors[q][7 + p] - get_etc1_dY(table_level, q);
             tw += c * t;
             tsq += c * t * t;
-            ok = ok && (c == 0 || (t >= lo_max && t <= hi_min));
+            tmin = min(tmin, c > 0 ? t : 1e9);
+            tmax = max(tmax, c > 0 ? t : -1e9);
             // saturation: for centers in [0, 255], clamp(x + dY_q) cannot get closer to m_q than this
             float d = q < 2 ? t - 255 : -t;
             sat += c * sq(max(d, 0.0f));
         }
-        float var = tsq - tw * tw * (1.0f / 8);
+        bool ok = tmin >= lo_max && tmax <= hi_min;
+        float tmean = tw * (1.0f / 8);
+        float var = tsq - tw * tmean;
+        // 4-bit mode: centers are multiples of 17
+        float d4 = abs(tmean - 17 * round(tmean * (1.0f / 17)));
+        float edge = max(min(tmean - tmin, tmax - tmean), 0.0f);
+        float var4 = var + 8 * sq(min(d4, edge));
         lb += ok ? max(var, sat) : sat;
+        lb4 += ok ? max(var4, sat) : sat;
     }
 
-    return lb - (16 + lb * (1.0f / 16384));
+    out_lb[0] = lb - (16 + lb * (1.0f / 16384));
+    out_lb[1] = lb4 - (16 + lb4 * (1.0f / 16384));
 }
 
 // Refines the candidate list for both diff modes at once: only the center quantization
@@ -3989,8 +4000,9 @@ inline void etc1_half_refine(uint32 out_qbits[2], int out_table[2], int out_qcen
             // Skip the table when its error lower bound cannot beat the current best in any lane for
             // either mode: the reference `err < best_error` test would fail anyway.
             {
-                float lb = etc1_table_lower_bound(colors, base_err, table_level);
-                if (all(lb > best_error[0] && lb > best_error[1])) continue;
+                float lb[2];
+                etc1_table_lower_bound(lb, colors, base_err, table_level);
+                if (all(lb[0] > best_error[0] && lb[1] > best_error[1])) continue;
             }
 
             float opt_center[3];
