@@ -3618,11 +3618,10 @@ float optimize_center(float colors[4][10], uniform int p, uniform int table_leve
     return best_center;
 }
 
-float compress_etc1_half_7(uint32 out_qbits[1], int out_table[1], int out_qcenter[3],
-                           float half_pixels[], etc_enc_state state[])
+// Candidate selection: depends only on the half-block pixels (not on diff mode),
+// so it is computed once per (flip, half) and shared by both diff modes.
+void etc1_half_candidates(int err_list[165], int y_sorted_inv[8], float half_pixels[], etc_enc_state state[])
 {
-    int err_list[165];
-    int y_sorted_inv[8];
     float y_sorted[8];
 
     {
@@ -3710,7 +3709,11 @@ float compress_etc1_half_7(uint32 out_qbits[1], int out_table[1], int out_qcente
     }
 
     partial_sort_list(err_list, 165, state->fastSkipTreshold);
+}
 
+float compress_etc1_half_7(uint32 out_qbits[1], int out_table[1], int out_qcenter[3],
+                           float half_pixels[], int err_list[165], int y_sorted_inv[8], etc_enc_state state[])
+{
     float best_error = sq(255) * 3 * 8.0f;
     int best_table = -1;
     int best_qcenter[3];
@@ -3812,9 +3815,10 @@ float compress_etc1_half_7(uint32 out_qbits[1], int out_table[1], int out_qcente
     return best_error;
 }
 
-float compress_etc1_half(uint32 qbits[1], int table[1], int qcenter[3], float half_pixels[], etc_enc_state state[])
+float compress_etc1_half(uint32 qbits[1], int table[1], int qcenter[3], float half_pixels[],
+                         int err_list[165], int y_sorted_inv[8], etc_enc_state state[])
 {
-    float err = compress_etc1_half_7(qbits, table, qcenter, half_pixels, state);
+    float err = compress_etc1_half_7(qbits, table, qcenter, half_pixels, err_list, y_sorted_inv, state);
 
     for (uniform int p = 0; p < 3; p++)
         state->prev_qcenter[p] = qcenter[p];
@@ -3897,27 +3901,34 @@ inline void CompressBlockETC1_core(etc_enc_state state[])
     }
 
     for (uniform int flip = 0; flip < 2; flip++)
+    {
+    varying float * uniform pixels = state->block;
+    if (flip == 0) pixels = flipped_block;
+
+    int err_list[2][165];
+    int y_sorted_inv[2][8];
+    etc1_half_candidates(err_list[0], y_sorted_inv[0], &pixels[0], state);
+    etc1_half_candidates(err_list[1], y_sorted_inv[1], &pixels[8], state);
+
     for (uniform int diff = 1; diff >= 0; diff--)
     {
         state->diff = diff == 1;
         state->prev_qcenter[0] = -1;
-
-        varying float * uniform pixels = state->block;
-        if (flip == 0) pixels = flipped_block;
 
         uint32 qbits[2];
         int tables[2];
         int qcenters[2][3];
 
         float err = 0;
-        err += compress_etc1_half(&qbits[0], &tables[0], qcenters[0], &pixels[0], state);
-        err += compress_etc1_half(&qbits[1], &tables[1], qcenters[1], &pixels[8], state);
+        err += compress_etc1_half(&qbits[0], &tables[0], qcenters[0], &pixels[0], err_list[0], y_sorted_inv[0], state);
+        err += compress_etc1_half(&qbits[1], &tables[1], qcenters[1], &pixels[8], err_list[1], y_sorted_inv[1], state);
 
         if (err < state->best_err)
         {
             state->best_err = err;
             etc_pack(state->best_data, qbits, tables, qcenters, diff, flip);
         }
+    }
     }
 }
 
