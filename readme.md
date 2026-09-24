@@ -1,3 +1,21 @@
+# Traverse Research fork
+
+Intel has discontinued this project (see the notice below). This is
+[Traverse Research](https://traverseresearch.nl)'s actively maintained fork: we
+fix bugs and are actively improving and optimizing the encoders. It is the
+kernel source for the Rust crate
+[`intel_tex_2`](https://github.com/Traverse-Research/intel-tex-rs-2).
+
+Changes so far:
+
+* **ETC1:** fixed an uninitialized-memory bug in `compress_etc1_half_7` that
+  could make every candidate error NaN and abort on `assert(v<pow2(bits))`.
+* **Performance (in progress, [`arm64-perf`](https://github.com/Traverse-Research/ISPCTextureCompressor/tree/arm64-perf)):**
+  single-threaded speedups for BC6H, BC7 and ETC1 on ARM64/NEON at unchanged
+  output quality, measured on Apple Silicon.
+
+Issues and pull requests are welcome in this repository.
+
 # DISCONTINUATION OF PROJECT #  
 This project will no longer be maintained by Intel.  
 Intel has ceased development and contributions including, but not limited to, maintenance, bug fixes, new releases, or updates, to this project.  
