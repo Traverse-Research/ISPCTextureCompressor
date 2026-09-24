@@ -1452,7 +1452,7 @@ inline float compute_opaque_err(float block[64], uniform int channels)
     return err;
 }
 
-inline float bc7_enc_mode01237_part_fast(int qep[24], uint32 qblock[2], float block[64], int part_id, uniform int mode)
+inline float bc7_enc_mode01237_part_fast(int qep[24], uint32 qblock[2], float block[64], int part_id, uniform int mode, float seg[])
 {
 	uint32 pattern = get_pattern(part_id);
 	uniform int bits = 2;  if (mode == 0 || mode == 1) bits = 3;
@@ -1460,10 +1460,18 @@ inline float bc7_enc_mode01237_part_fast(int qep[24], uint32 qblock[2], float bl
     uniform int channels = 3; if (mode == 7) channels = 4;
 
 	float ep[24];
-	for (uniform int j=0; j<pairs; j++)
+	if (seg != NULL)
 	{
-		int mask = get_pattern_mask(part_id, j);
-		block_segment(&ep[j*8], block, mask, channels);
+		// PCA segments precomputed by the caller (shared between modes 1 and 3)
+		for (uniform int i=0; i<8*pairs; i++) ep[i] = seg[i];
+	}
+	else
+	{
+		for (uniform int j=0; j<pairs; j++)
+		{
+			int mask = get_pattern_mask(part_id, j);
+			block_segment(&ep[j*8], block, mask, channels);
+		}
 	}
 
 	ep_quant_dequant(qep, ep, mode, channels);
@@ -1472,7 +1480,7 @@ inline float bc7_enc_mode01237_part_fast(int qep[24], uint32 qblock[2], float bl
 	return total_err;
 }
 
-inline void bc7_enc_mode01237(bc7_enc_state state[], uniform int mode, int part_list[], uniform int part_count)
+inline void bc7_enc_mode01237(bc7_enc_state state[], uniform int mode, int part_list[], uniform int part_count, float segs[])
 {
 	if (part_count == 0) return;
 	uniform int bits = 2;  if (mode == 0 || mode == 1) bits = 3;
@@ -1491,7 +1499,7 @@ inline void bc7_enc_mode01237(bc7_enc_state state[], uniform int mode, int part_
 
 		int qep[24];
 		uint32 qblock[2];
-		float err = bc7_enc_mode01237_part_fast(qep, qblock, state->block, part_id, mode);
+		float err = bc7_enc_mode01237_part_fast(qep, qblock, state->block, part_id, mode, segs != NULL ? &segs[part*16] : NULL);
         
 		if (err<best_err)
 		{
@@ -1565,8 +1573,8 @@ inline void bc7_enc_mode02(bc7_enc_state state[])
 	for (uniform int part=0; part<64; part++)
 		part_list[part] = part;
 
-	bc7_enc_mode01237(state, 0, part_list, 16); 
-	if (!state->skip_mode2) bc7_enc_mode01237(state, 2, part_list, 64); // usually not worth the time
+	bc7_enc_mode01237(state, 0, part_list, 16, NULL); 
+	if (!state->skip_mode2) bc7_enc_mode01237(state, 2, part_list, 64, NULL); // usually not worth the time
 }
 
 inline void bc7_enc_mode13(bc7_enc_state state[])
@@ -1586,8 +1594,22 @@ inline void bc7_enc_mode13(bc7_enc_state state[])
 	}
 
 	partial_sort_list(part_list, 64, max(state->fastSkipTreshold_mode1, state->fastSkipTreshold_mode3));
-	bc7_enc_mode01237(state, 1, part_list, state->fastSkipTreshold_mode1);
-	bc7_enc_mode01237(state, 3, part_list, state->fastSkipTreshold_mode3);
+	// Modes 1 and 3 share the same ranked partition list and the same PCA segments per
+	// partition; only the endpoint/index quantization differs, so segment once.
+	uniform int shared_count = max(state->fastSkipTreshold_mode1, state->fastSkipTreshold_mode3);
+	float segs[64*16];
+	for (uniform int part=0; part<shared_count; part++)
+	{
+		int part_id = part_list[part]&63;
+		for (uniform int j=0; j<2; j++)
+		{
+			int mask = get_pattern_mask(part_id, j);
+			block_segment(&segs[part*16+j*8], state->block, mask, 3);
+		}
+	}
+
+	bc7_enc_mode01237(state, 1, part_list, state->fastSkipTreshold_mode1, segs);
+	bc7_enc_mode01237(state, 3, part_list, state->fastSkipTreshold_mode3, segs);
 }
 
 inline void bc7_enc_mode7(bc7_enc_state state[])
@@ -1607,7 +1629,7 @@ inline void bc7_enc_mode7(bc7_enc_state state[])
 	}
 
 	partial_sort_list(part_list, 64, state->fastSkipTreshold_mode7);
-	bc7_enc_mode01237(state, 7, part_list, state->fastSkipTreshold_mode7);
+	bc7_enc_mode01237(state, 7, part_list, state->fastSkipTreshold_mode7, NULL);
 }
 
 inline void channel_quant_dequant(int qep[2], float ep[2], uniform int epbits)
