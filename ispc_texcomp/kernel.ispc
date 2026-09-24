@@ -759,9 +759,9 @@ struct mode45_parameters
 	int swap;
 };
 
-void bc7_code_mode01237(uint32 data[5], int qep[6], uint32 qblock[2], int part_id, uniform int mode);
-void bc7_code_mode45(uint32 data[5], mode45_parameters params[], uniform int mode);
-void bc7_code_mode6(uint32 data[5], int qep[8], uint32 qblock[2]);
+inline void bc7_code_mode01237(uint32 data[5], int qep[6], uint32 qblock[2], int part_id, uniform int mode);
+inline void bc7_code_mode45(uint32 data[5], mode45_parameters params[], uniform int mode);
+inline void bc7_code_mode6(uint32 data[5], int qep[8], uint32 qblock[2]);
 
 ///////////////////////////
 //   BC7 format data
@@ -925,7 +925,7 @@ inline void compute_covar_dc_masked(float covar[6], float dc[3], float block[64]
 	for (uniform int p=0; p<channels; p++) dc[p] = stats[10+p]/stats[14];
 }
 
-void block_pca_axis(float axis[4], float dc[4], float block[64], int mask, uniform int channels)
+inline void block_pca_axis(float axis[4], float dc[4], float block[64], int mask, uniform int channels)
 {
 	uniform const int powerIterations = 8; // 4 not enough for HQ
 
@@ -948,7 +948,7 @@ void block_pca_axis(float axis[4], float dc[4], float block[64], int mask, unifo
 	compute_axis(axis, covar, powerIterations, channels);
 }
 
-void block_segment_core(float ep[], float block[64], int mask, uniform int channels)
+inline void block_segment_core(float ep[], float block[64], int mask, uniform int channels)
 {
 	float axis[4];
 	float dc[4];
@@ -987,7 +987,7 @@ void block_segment_core(float ep[], float block[64], int mask, uniform int chann
     }
 }
 
-void block_segment(float ep[], float block[64], int mask, uniform int channels)
+inline void block_segment(float ep[], float block[64], int mask, uniform int channels)
 {
     block_segment_core(ep, block, mask, channels);
 
@@ -998,7 +998,7 @@ void block_segment(float ep[], float block[64], int mask, uniform int channels)
 	}
 }
 
-float get_pca_bound(float covar[10], uniform int channels)
+inline float get_pca_bound(float covar[10], uniform int channels)
 {
     uniform const int powerIterations = 4; // quite approximative, but enough for bounding
 
@@ -1032,7 +1032,7 @@ float get_pca_bound(float covar[10], uniform int channels)
 	return bound;
 }
 
-float block_pca_bound(float block[64], int mask, uniform int channels)
+inline float block_pca_bound(float block[64], int mask, uniform int channels)
 {
 	float stats[15];
 	compute_stats_masked(stats, block, mask, channels);
@@ -1043,7 +1043,7 @@ float block_pca_bound(float block[64], int mask, uniform int channels)
 	return get_pca_bound(covar, channels);
 }
 
-float block_pca_bound_split(float block[64], int mask, float full_stats[15], uniform int channels)
+inline float block_pca_bound_split(float block[64], int mask, float full_stats[15], uniform int channels)
 {
     float stats[15];
 	compute_stats_masked(stats, block, mask, channels);
@@ -1074,7 +1074,7 @@ inline int unpack_to_byte(int v, uniform const int bits)
 	return vv + shift_right(vv, bits);
 }
 
-void ep_quant0367(int qep[], float ep[], uniform int mode, uniform int channels)
+inline void ep_quant0367(int qep[], float ep[], uniform int mode, uniform int channels)
 {
 	uniform int bits = 7;
     if (mode == 0) bits = 4;
@@ -1115,7 +1115,7 @@ void ep_quant0367(int qep[], float ep[], uniform int mode, uniform int channels)
     }
 }
 
-void ep_quant1(int qep[], float ep[], uniform int mode)
+inline void ep_quant1(int qep[], float ep[], uniform int mode)
 {
 	int qep_b[16];
         
@@ -1145,7 +1145,7 @@ void ep_quant1(int qep[], float ep[], uniform int mode)
 
 }
 
-void ep_quant245(int qep[], float ep[], uniform int mode)
+inline void ep_quant245(int qep[], float ep[], uniform int mode)
 {
 	uniform int bits = 5;
     if (mode == 5) bits = 7;
@@ -1158,7 +1158,7 @@ void ep_quant245(int qep[], float ep[], uniform int mode)
 	}
 }
 
-void ep_quant(int qep[], float ep[], uniform int mode, uniform int channels)
+inline void ep_quant(int qep[], float ep[], uniform int mode, uniform int channels)
 {
 	assert(mode <= 7);
 	static uniform const int pairs_table[] = {3,2,3,2,1,1,1,2};
@@ -1184,7 +1184,7 @@ void ep_quant(int qep[], float ep[], uniform int mode, uniform int channels)
 
 }
 
-void ep_dequant(float ep[], int qep[], uniform int mode)
+inline void ep_dequant(float ep[], int qep[], uniform int mode)
 {
     assert(mode <= 7);
 	static uniform const int pairs_table[] = {3,2,3,2,1,1,1,2};
@@ -1215,7 +1215,7 @@ void ep_dequant(float ep[], int qep[], uniform int mode)
 		assert(false);
 }
 
-void ep_quant_dequant(int qep[], float ep[], uniform int mode, uniform int channels)
+inline void ep_quant_dequant(int qep[], float ep[], uniform int mode, uniform int channels)
 {
 	ep_quant(qep, ep, mode, channels);
 	ep_dequant(ep, qep, mode);
@@ -1224,7 +1224,7 @@ void ep_quant_dequant(int qep[], float ep[], uniform int mode, uniform int chann
 ///////////////////////////
 //   pixel quantization
 
-float block_quant(uint32 qblock[2], float block[64], uniform int bits, float ep[], uint32 pattern, uniform int channels, uniform int pairs)
+inline float block_quant(uint32 qblock[2], float block[64], uniform int bits, float ep[], uint32 pattern, uniform int channels, uniform int pairs)
 {
 	float total_err = 0;
     uniform int levels = 1 << bits;
@@ -1305,7 +1305,7 @@ float block_quant(uint32 qblock[2], float block[64], uniform int bits, float ep[
 ///////////////////////////
 // LS endpoint refinement
 
-void opt_endpoints(float ep[], float block[64], uniform int bits, uint32 qblock[2], int mask, uniform int channels)
+inline void opt_endpoints(float ep[], float block[64], uniform int bits, uint32 qblock[2], int mask, uniform int channels)
 {
 	uniform int levels = 1 << bits;
     
@@ -1374,7 +1374,7 @@ void opt_endpoints(float ep[], float block[64], uniform int bits, uint32 qblock[
 //////////////////////////
 // parameter estimation
 
-float compute_opaque_err(float block[64], uniform int channels)
+inline float compute_opaque_err(float block[64], uniform int channels)
 {
     if (channels == 3) return 0;
     float err = 0f;
@@ -1386,7 +1386,7 @@ float compute_opaque_err(float block[64], uniform int channels)
     return err;
 }
 
-float bc7_enc_mode01237_part_fast(int qep[24], uint32 qblock[2], float block[64], int part_id, uniform int mode)
+inline float bc7_enc_mode01237_part_fast(int qep[24], uint32 qblock[2], float block[64], int part_id, uniform int mode)
 {
 	uint32 pattern = get_pattern(part_id);
 	uniform int bits = 2;  if (mode == 0 || mode == 1) bits = 3;
@@ -1406,7 +1406,7 @@ float bc7_enc_mode01237_part_fast(int qep[24], uint32 qblock[2], float block[64]
 	return total_err;
 }
 
-void bc7_enc_mode01237(bc7_enc_state state[], uniform int mode, int part_list[], uniform int part_count)
+inline void bc7_enc_mode01237(bc7_enc_state state[], uniform int mode, int part_list[], uniform int part_count)
 {
 	if (part_count == 0) return;
 	uniform int bits = 2;  if (mode == 0 || mode == 1) bits = 3;
@@ -1472,7 +1472,7 @@ void bc7_enc_mode01237(bc7_enc_state state[], uniform int mode, int part_list[],
     }
 }
 
-void partial_sort_list(int list[], uniform int length, uniform int partial_count)
+inline void partial_sort_list(int list[], uniform int length, uniform int partial_count)
 {
 	for (uniform int k=0; k<partial_count; k++)
 	{
@@ -1493,7 +1493,7 @@ void partial_sort_list(int list[], uniform int length, uniform int partial_count
 	}
 }
 
-void bc7_enc_mode02(bc7_enc_state state[])
+inline void bc7_enc_mode02(bc7_enc_state state[])
 {
 	int part_list[64];
 	for (uniform int part=0; part<64; part++)
@@ -1503,7 +1503,7 @@ void bc7_enc_mode02(bc7_enc_state state[])
 	if (!state->skip_mode2) bc7_enc_mode01237(state, 2, part_list, 64); // usually not worth the time
 }
 
-void bc7_enc_mode13(bc7_enc_state state[])
+inline void bc7_enc_mode13(bc7_enc_state state[])
 {
 	if (state->fastSkipTreshold_mode1 == 0 && state->fastSkipTreshold_mode3 == 0) return;
 
@@ -1524,7 +1524,7 @@ void bc7_enc_mode13(bc7_enc_state state[])
 	bc7_enc_mode01237(state, 3, part_list, state->fastSkipTreshold_mode3);
 }
 
-void bc7_enc_mode7(bc7_enc_state state[])
+inline void bc7_enc_mode7(bc7_enc_state state[])
 {
     if (state->fastSkipTreshold_mode7 == 0) return;
 
@@ -1544,7 +1544,7 @@ void bc7_enc_mode7(bc7_enc_state state[])
 	bc7_enc_mode01237(state, 7, part_list, state->fastSkipTreshold_mode7);
 }
 
-void channel_quant_dequant(int qep[2], float ep[2], uniform int epbits)
+inline void channel_quant_dequant(int qep[2], float ep[2], uniform int epbits)
 {
 	int elevels = (1<<epbits);
 
@@ -1556,7 +1556,7 @@ void channel_quant_dequant(int qep[2], float ep[2], uniform int epbits)
 	}
 }
 
-void channel_opt_endpoints(float ep[2], float block[16], uniform int bits, uint32 qblock[2])
+inline void channel_opt_endpoints(float ep[2], float block[16], uniform int bits, uint32 qblock[2])
 {
 	uniform int levels = 1 << bits;
 
@@ -1605,7 +1605,7 @@ void channel_opt_endpoints(float ep[2], float block[16], uniform int bits, uint3
 	}
 }
 
-float channel_opt_quant(uint32 qblock[2], float block[16], uniform int bits, float ep[])
+inline float channel_opt_quant(uint32 qblock[2], float block[16], uniform int bits, float ep[])
 {
 	uniform const int* uniform unquant_table = get_unquant_table(bits);
 	int levels = (1<<bits);
@@ -1647,7 +1647,7 @@ float channel_opt_quant(uint32 qblock[2], float block[16], uniform int bits, flo
 	return total_err;
 }
 
-float opt_channel(bc7_enc_state state[], uint32 qblock[2], int qep[2], float block[16], uniform int bits, uniform int epbits)
+inline float opt_channel(bc7_enc_state state[], uint32 qblock[2], int qep[2], float block[16], uniform int bits, uniform int epbits)
 {
 	float ep[2] = {255,0};
 
@@ -1672,7 +1672,7 @@ float opt_channel(bc7_enc_state state[], uint32 qblock[2], int qep[2], float blo
 	return err;
 }
 
-void bc7_enc_mode45_candidate(bc7_enc_state state[], mode45_parameters best_candidate[], 
+inline void bc7_enc_mode45_candidate(bc7_enc_state state[], mode45_parameters best_candidate[], 
 	float best_err[], uniform int mode, uniform int rotation, uniform int swap)
 {
 	uniform int bits = 2; 
@@ -1730,7 +1730,7 @@ void bc7_enc_mode45_candidate(bc7_enc_state state[], mode45_parameters best_cand
 	}	
 }
 
-void bc7_enc_mode45(bc7_enc_state state[])
+inline void bc7_enc_mode45(bc7_enc_state state[])
 {
 	mode45_parameters best_candidate;
 	float best_err = state->best_err;
@@ -1764,7 +1764,7 @@ void bc7_enc_mode45(bc7_enc_state state[])
     }
 }
 
-void bc7_enc_mode6(bc7_enc_state state[])
+inline void bc7_enc_mode6(bc7_enc_state state[])
 {
 	uniform int mode = 6;
 	uniform int bits = 4;
@@ -1801,7 +1801,7 @@ void bc7_enc_mode6(bc7_enc_state state[])
 //////////////////////////
 // BC7 bitstream coding
 
-void bc7_code_apply_swap_mode456(int qep[], uniform int channels, uint32 qblock[2], uniform int bits)
+inline void bc7_code_apply_swap_mode456(int qep[], uniform int channels, uint32 qblock[2], uniform int bits)
 {
 	uniform int levels = 1 << bits;
 	if ((qblock[0]&15)>=levels/2)
@@ -1815,7 +1815,7 @@ void bc7_code_apply_swap_mode456(int qep[], uniform int channels, uint32 qblock[
 	assert((qblock[0]&15) < levels/2);
 }
 
-int bc7_code_apply_swap_mode01237(int qep[], uint32 qblock[2], uniform int mode, int part_id)
+inline int bc7_code_apply_swap_mode01237(int qep[], uint32 qblock[2], uniform int mode, int part_id)
 {
 	uniform int bits = 2;  if (mode == 0 || mode == 1) bits = 3;
     uniform int pairs = 2; if (mode == 0 || mode == 2) pairs = 3;
@@ -1842,7 +1842,7 @@ int bc7_code_apply_swap_mode01237(int qep[], uint32 qblock[2], uniform int mode,
 	return flips;
 }
 
-void put_bits(uint32 data[5], uniform int* uniform pos, uniform int bits, int v)
+inline void put_bits(uint32 data[5], uniform int* uniform pos, uniform int bits, int v)
 {
 	assert(v<pow2(bits));
 	data[*pos/32] |= ((uint32)v) << (*pos%32);
@@ -1874,7 +1874,7 @@ inline void data_shl_1bit_from(uint32 data[5], int from)
 	}
 }
 
-void bc7_code_qblock(uint32 data[5], uniform int* uniform pPos, uint32 qblock[2], uniform int bits, int flips)
+inline void bc7_code_qblock(uint32 data[5], uniform int* uniform pPos, uint32 qblock[2], uniform int bits, int flips)
 {
 	uniform int levels = 1 << bits;
 	int flips_shifted = flips;
@@ -1894,7 +1894,7 @@ void bc7_code_qblock(uint32 data[5], uniform int* uniform pPos, uint32 qblock[2]
 	}
 }
 
-void bc7_code_adjust_skip_mode01237(uint32 data[5], uniform int mode, int part_id)
+inline void bc7_code_adjust_skip_mode01237(uint32 data[5], uniform int mode, int part_id)
 {
 	uniform int bits = 2;  if (mode == 0 || mode == 1) bits = 3;
     uniform int pairs = 2; if (mode == 0 || mode == 2) pairs = 3;
@@ -1914,7 +1914,7 @@ void bc7_code_adjust_skip_mode01237(uint32 data[5], uniform int mode, int part_i
 	}
 }
 
-void bc7_code_mode01237(uint32 data[5], int qep[], uint32 qblock[2], int part_id, uniform int mode)
+inline void bc7_code_mode01237(uint32 data[5], int qep[], uint32 qblock[2], int part_id, uniform int mode)
 {
 	uniform int bits = 2;  if (mode == 0 || mode == 1) bits = 3;
     uniform int pairs = 2; if (mode == 0 || mode == 2) pairs = 3;
@@ -1986,7 +1986,7 @@ void bc7_code_mode01237(uint32 data[5], int qep[], uint32 qblock[2], int part_id
 	bc7_code_adjust_skip_mode01237(data, mode, part_id);
 }
 
-void bc7_code_mode45(uint32 data[5], varying mode45_parameters* uniform params, uniform int mode)
+inline void bc7_code_mode45(uint32 data[5], varying mode45_parameters* uniform params, uniform int mode)
 {
 	int qep[8];
 	uint32 qblock[2];
@@ -2048,7 +2048,7 @@ void bc7_code_mode45(uint32 data[5], varying mode45_parameters* uniform params, 
     bc7_code_qblock(data, &pos, aqblock, abits, 0);
 }
 
-void bc7_code_mode6(uint32 data[5], int qep[8], uint32 qblock[2])
+inline void bc7_code_mode6(uint32 data[5], int qep[8], uint32 qblock[2])
 {
 	bc7_code_apply_swap_mode456(qep, 4, qblock, 4);
 
@@ -2086,7 +2086,7 @@ inline void CompressBlockBC7_core(bc7_enc_state state[])
 	if (state->mode_selection[3]) bc7_enc_mode6(state);
 }
 
-void bc7_enc_copy_settings(bc7_enc_state state[], uniform bc7_enc_settings settings[])
+inline void bc7_enc_copy_settings(bc7_enc_state state[], uniform bc7_enc_settings settings[])
 {
 	state->channels = settings->channels;
 	
@@ -2181,8 +2181,8 @@ struct bc6h_enc_state
     uniform int fastSkipTreshold;
 };
 
-void bc6h_code_2p(uint32 data[5], int pqep[], uint32 qblock[2], int part_id, int mode);
-void bc6h_code_1p(uint32 data[5], int qep[8], uint32 qblock[2], int mode);
+inline void bc6h_code_2p(uint32 data[5], int pqep[], uint32 qblock[2], int part_id, int mode);
+inline void bc6h_code_1p(uint32 data[5], int qep[8], uint32 qblock[2], int mode);
 
 ///////////////////////////
 //   BC6H format data
@@ -2246,7 +2246,7 @@ inline int unpack_to_uf16(uint32 v, int bits)
     return (v * 2 + 1) << (15-bits);
 }
 
-void ep_quant_bc6h(int qep[], float ep[], int bits, uniform int pairs)
+inline void ep_quant_bc6h(int qep[], float ep[], int bits, uniform int pairs)
 {
     int levels = 1 << bits;
 
@@ -2257,13 +2257,13 @@ void ep_quant_bc6h(int qep[], float ep[], int bits, uniform int pairs)
     }
 }
 
-void ep_dequant_bc6h(float ep[], int qep[], int bits, uniform int pairs)
+inline void ep_dequant_bc6h(float ep[], int qep[], int bits, uniform int pairs)
 {
     for (uniform int i = 0; i < 8 * pairs; i++)
         ep[i] = unpack_to_uf16(qep[i], bits);
 }
 
-void ep_quant_dequant_bc6h(bc6h_enc_state state[], int qep[], float ep[], uniform int pairs)
+inline void ep_quant_dequant_bc6h(bc6h_enc_state state[], int qep[], float ep[], uniform int pairs)
 {
     int bits = state->epb;
     ep_quant_bc6h(qep, ep, bits, pairs);
@@ -2281,7 +2281,7 @@ void ep_quant_dequant_bc6h(bc6h_enc_state state[], int qep[], float ep[], unifor
 //////////////////////////
 // parameter estimation
 
-float bc6h_enc_2p_part_fast(bc6h_enc_state state[], int qep[16], uint32 qblock[2], int part_id)
+inline float bc6h_enc_2p_part_fast(bc6h_enc_state state[], int qep[16], uint32 qblock[2], int part_id)
 {
     uint32 pattern = get_pattern(part_id);
     uniform int bits = 3;
@@ -2302,7 +2302,7 @@ float bc6h_enc_2p_part_fast(bc6h_enc_state state[], int qep[16], uint32 qblock[2
 
 }
 
-void bc6h_enc_2p_list(bc6h_enc_state state[], int part_list[], uniform int part_count)
+inline void bc6h_enc_2p_list(bc6h_enc_state state[], int part_list[], uniform int part_count)
 {
     if (part_count == 0) return;
     uniform int bits = 3;
@@ -2364,7 +2364,7 @@ void bc6h_enc_2p_list(bc6h_enc_state state[], int part_list[], uniform int part_
     }
 }
 
-void bc6h_enc_2p(bc6h_enc_state state[])
+inline void bc6h_enc_2p(bc6h_enc_state state[])
 {
     float full_stats[15];
     compute_stats_masked(full_stats, state->block, -1, 3);
@@ -2382,7 +2382,7 @@ void bc6h_enc_2p(bc6h_enc_state state[])
     bc6h_enc_2p_list(state, part_list, state->fastSkipTreshold);
 }
 
-void bc6h_enc_1p(bc6h_enc_state state[])
+inline void bc6h_enc_1p(bc6h_enc_state state[])
 {
     float ep[8];
     block_segment_core(ep, state->block, -1, 3);
@@ -2423,13 +2423,13 @@ inline void compute_qbounds(bc6h_enc_state state[], float rgb_span[3])
     ep_quant_bc6h(state->qbounds, bounds, state->epb, 1);
 }
 
-void compute_qbounds(bc6h_enc_state state[], float span)
+inline void compute_qbounds(bc6h_enc_state state[], float span)
 {
     float rgb_span[3] = { span, span, span };
     compute_qbounds(state, rgb_span);
 }
 
-void compute_qbounds2(bc6h_enc_state state[], float span, int max_span_idx)
+inline void compute_qbounds2(bc6h_enc_state state[], float span, int max_span_idx)
 {
     float rgb_span[3] = { span, span, span };
     for (uniform int p = 0; p < 3; p++)
@@ -2439,7 +2439,7 @@ void compute_qbounds2(bc6h_enc_state state[], float span, int max_span_idx)
     compute_qbounds(state, rgb_span);
 }
 
-void bc6h_test_mode(bc6h_enc_state state[], uniform int mode, uniform bool enc, uniform float margin)
+inline void bc6h_test_mode(bc6h_enc_state state[], uniform int mode, uniform bool enc, uniform float margin)
 {
     uniform int mode_bits = get_mode_bits(mode);
     uniform float span = get_span(mode);
@@ -2477,12 +2477,12 @@ void bc6h_test_mode(bc6h_enc_state state[], uniform int mode, uniform bool enc, 
 //////////////////////////
 // BC6H bitstream coding
 
-int bit_at(int v, uniform int pos)
+inline int bit_at(int v, uniform int pos)
 {
     return (v >> pos) & 1;
 }
 
-uint32 reverse_bits(uint32 v, uniform int bits)
+inline uint32 reverse_bits(uint32 v, uniform int bits)
 {
     if (bits == 2)
     {
@@ -2499,7 +2499,7 @@ uint32 reverse_bits(uint32 v, uniform int bits)
     }
 }
 
-void bc6h_pack(uint32 packed[], int qep[], int mode)
+inline void bc6h_pack(uint32 packed[], int qep[], int mode)
 {
     if (mode == 0)
     {
@@ -3089,7 +3089,7 @@ void bc6h_pack(uint32 packed[], int qep[], int mode)
     }
 }
 
-void bc6h_code_2p(uint32 data[5], int qep[], uint32 qblock[2], int part_id, int mode)
+inline void bc6h_code_2p(uint32 data[5], int qep[], uint32 qblock[2], int part_id, int mode)
 {
 	uniform int bits = 3;
     uniform int pairs = 2;
@@ -3119,7 +3119,7 @@ void bc6h_code_2p(uint32 data[5], int qep[], uint32 qblock[2], int part_id, int 
 	bc7_code_adjust_skip_mode01237(data, 1, part_id);
 }
 
-void bc6h_code_1p(uint32 data[5], int qep[8], uint32 qblock[2], int mode)
+inline void bc6h_code_1p(uint32 data[5], int qep[8], uint32 qblock[2], int mode)
 {
     bc7_code_apply_swap_mode456(qep, 4, qblock, 4);
 
@@ -3143,7 +3143,7 @@ void bc6h_code_1p(uint32 data[5], int qep[8], uint32 qblock[2], int mode)
 //////////////////////////
 //       BC6H core
 
-void bc6h_setup(bc6h_enc_state state[])
+inline void bc6h_setup(bc6h_enc_state state[])
 {
     for (uniform int p = 0; p < 3; p++)
     {
@@ -3216,7 +3216,7 @@ inline void CompressBlockBC6H_core(bc6h_enc_state state[])
     } 
 }
 
-void bc6h_enc_copy_settings(bc6h_enc_state state[], uniform bc6h_enc_settings settings[])
+inline void bc6h_enc_copy_settings(bc6h_enc_state state[], uniform bc6h_enc_settings settings[])
 {
     state->slow_mode = settings->slow_mode;
     state->fast_mode = settings->fast_mode;
