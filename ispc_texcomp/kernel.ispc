@@ -1737,8 +1737,14 @@ inline void channel_opt_endpoints(float ep[2], float block[16], uniform int bits
 
 inline float channel_opt_quant(uint32 qblock[2], float block[16], uniform int bits, float ep[])
 {
-	uniform const int* uniform unquant_table = get_unquant_table(bits);
-	int levels = (1<<bits);
+	uniform int levels = (1<<bits);
+	// same weights as the unquant tables, see block_quant
+	uniform float wscale = 64.0f / (levels - 1);
+
+	// endpoints are integers after channel_quant_dequant, so interpolate exactly in int32
+	float inv_range = 1.0f/(ep[1]-ep[0]+0.001f);
+	int a64 = (int)ep[0]*64+32;
+	int d = (int)ep[1]-(int)ep[0];
 
 	qblock[0] = 0;
 	qblock[1] = 0;
@@ -1747,20 +1753,18 @@ inline float channel_opt_quant(uint32 qblock[2], float block[16], uniform int bi
 
 	for (uniform int k=0; k<16; k++)
 	{
-		float proj = (block[k]-ep[0])/(ep[1]-ep[0]+0.001f);
+		float proj = (block[k]-ep[0])*inv_range;
 
 		int q1 = (int)(proj*levels+0.5);
 		q1 = clamp(q1, 1, levels-1);
 
-		float err0 = 0;
-		float err1 = 0;
-		int w0 = gather_int(unquant_table, q1-1);
-		int w1 = gather_int(unquant_table, q1);
-		
-		float dec_v0 = (int)(((64-w0)*ep[0] + w0*ep[1] + 32)/64);
-		float dec_v1 = (int)(((64-w1)*ep[0] + w1*ep[1] + 32)/64);
-		err0 += sq(dec_v0 - block[k]);
-		err1 += sq(dec_v1 - block[k]);
+		int w0 = (int)((q1-1)*wscale+0.5f);
+		int w1 = (int)(q1*wscale+0.5f);
+
+		float dec_v0 = (a64 + w0*d) >> 6;
+		float dec_v1 = (a64 + w1*d) >> 6;
+		float err0 = sq(dec_v0 - block[k]);
+		float err1 = sq(dec_v1 - block[k]);
 
 		int best_err = err1;
 		int best_q = q1;
