@@ -732,6 +732,7 @@ struct bc7_enc_state
 
     float opaque_err;       // error for coding alpha=255
 	float best_err;
+	bool best_is_late;      // best_data came from a mode that the original order evaluates after modes 0-3
 	uint32 best_data[5];	// 4, +1 margin for skips
 
 	// settings
@@ -1585,9 +1586,13 @@ inline void bc7_enc_mode01237(bc7_enc_state state[], uniform int mode, int part_
     
 	if (mode != 7) best_err += state->opaque_err; // take into account alpha channel
 
-	if (best_err<state->best_err)
+	// Modes 0-3 may be evaluated after modes 4-7 (see CompressBlockBC7_core); they still
+	// win ties against those, exactly like in the original evaluation order.
+	bool better = (mode != 7 && state->best_is_late) ? best_err<=state->best_err : best_err<state->best_err;
+	if (better)
     {
         state->best_err = best_err;
+        state->best_is_late = false;
         bc7_code_mode01237(state->best_data, best_qep, best_qblock, best_part_id, mode);
     }
 }
@@ -2224,11 +2229,31 @@ inline void bc7_code_mode6(uint32 data[5], int qep[8], uint32 qblock[2])
 
 inline void CompressBlockBC7_core(bc7_enc_state state[])
 {
-	if (state->mode_selection[0]) bc7_enc_mode02(state);
-	if (state->mode_selection[1]) bc7_enc_mode13(state);
-	if (state->mode_selection[1]) bc7_enc_mode7(state);
-	if (state->mode_selection[2]) bc7_enc_mode45(state);
-	if (state->mode_selection[3]) bc7_enc_mode6(state);
+	state->best_is_late = false;
+	if (state->channels == 4)
+	{
+		// Modes 0-3 can't store alpha: their error is at least opaque_err. Evaluate the
+		// alpha-capable modes first so modes 0-3 can be skipped for blocks where they can't
+		// win. Modes 0-3 win ties against the earlier-evaluated modes (best_is_late), so the
+		// result is identical to the original 0/2, 1/3, 7, 4/5, 6 order.
+		if (state->mode_selection[1]) bc7_enc_mode7(state);
+		if (state->mode_selection[2]) bc7_enc_mode45(state);
+		if (state->mode_selection[3]) bc7_enc_mode6(state);
+		state->best_is_late = true;
+		if (state->opaque_err <= state->best_err)
+		{
+			if (state->mode_selection[0]) bc7_enc_mode02(state);
+			if (state->mode_selection[1]) bc7_enc_mode13(state);
+		}
+	}
+	else
+	{
+		if (state->mode_selection[0]) bc7_enc_mode02(state);
+		if (state->mode_selection[1]) bc7_enc_mode13(state);
+		if (state->mode_selection[1]) bc7_enc_mode7(state);
+		if (state->mode_selection[2]) bc7_enc_mode45(state);
+		if (state->mode_selection[3]) bc7_enc_mode6(state);
+	}
 }
 
 inline void bc7_enc_copy_settings(bc7_enc_state state[], uniform bc7_enc_settings settings[])
